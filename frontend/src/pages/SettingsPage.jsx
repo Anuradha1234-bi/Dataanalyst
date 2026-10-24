@@ -202,7 +202,7 @@ export const SettingsPage = () => {
 
   if (loading) {
     return (
-      <div className="space-y-6">
+      <div className="max-w-7xl mx-auto w-full min-w-0 space-y-6">
         <div>
           <h1 className="text-xl font-bold text-[#0F172A]">System Settings</h1>
           <p className="text-xs text-[#64748B] mt-1">Loading system configuration and quotas...</p>
@@ -216,7 +216,7 @@ export const SettingsPage = () => {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="max-w-7xl mx-auto w-full min-w-0 space-y-6">
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>

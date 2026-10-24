@@ -32,6 +32,7 @@ class PredictionRun(Base):
     metrics_json = Column(Text, nullable=True)
     model_comparison_json = Column(Text, nullable=True)
     predictions_json = Column(Text, nullable=True)
+    validation_predictions_json = Column(Text, nullable=True)
     feature_importance_json = Column(Text, nullable=True)
     features_used_json = Column(Text, nullable=True)
     features_excluded_json = Column(Text, nullable=True)

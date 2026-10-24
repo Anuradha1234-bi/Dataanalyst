@@ -18,10 +18,13 @@ from app.models.analysis_history import AnalysisHistory
 from app.schemas.relationship import (
     RelationshipDetectResponse,
     RelationshipItem,
+    DuplicateDatasetItem,
+    DuplicateDetectResponse,
     JoinPreviewResponse,
     JoinApplyResponse,
 )
 from services.relationship_detector import RelationshipDetector
+from services.duplicate_detector import DuplicateDatasetDetector
 from models.relationship import Relationship
 from utils.file_loader import FileLoader
 
@@ -250,12 +253,72 @@ class RelationshipService:
                 "To join datasets, ensure they share a common identifier column (e.g. ID, code, name, category) with matching values."
             )
 
+        # 4. Content-based Smart Duplicate Dataset Detection
+        duplicate_results = DuplicateDatasetDetector.detect_all_duplicates(dfs, dataset_map)
+        duplicate_items = [DuplicateDatasetItem(**d.to_dict()) for d in duplicate_results]
+
         return RelationshipDetectResponse(
             total_detected=len(items),
             analyzed_datasets_count=len(dfs),
             relationships=items,
+            duplicate_datasets=duplicate_items,
             scan_summary=scan_summary,
             message=msg,
+        )
+
+    @classmethod
+    def detect_duplicates(cls, datasets: List[Dataset]) -> DuplicateDetectResponse:
+        """Dedicated detection of duplicate or overlapping datasets by analyzing actual cell values."""
+        if len(datasets) < 2:
+            return DuplicateDetectResponse(
+                total_pairs_evaluated=0,
+                duplicates_detected_count=0,
+                duplicate_datasets=[],
+                summary={"message": "At least 2 datasets required to evaluate duplicates."},
+            )
+
+        dfs: Dict[str, pd.DataFrame] = {}
+        dataset_map: Dict[str, Dataset] = {}
+
+        for ds in datasets:
+            active_path = cls._get_active_filepath(ds)
+            if not active_path.exists():
+                continue
+            load_res = FileLoader.load_file(active_path, ds.filename, ds.file_size_bytes or 0)
+            if load_res.success and load_res.df is not None:
+                key = f"{ds.id}::{ds.filename}"
+                dfs[key] = load_res.df
+                dataset_map[key] = ds
+
+        if len(dfs) < 2:
+            return DuplicateDetectResponse(
+                total_pairs_evaluated=0,
+                duplicates_detected_count=0,
+                duplicate_datasets=[],
+                summary={"message": "Could not read sufficient valid datasets to compare."},
+            )
+
+        duplicate_results = DuplicateDatasetDetector.detect_all_duplicates(dfs, dataset_map)
+        items = [DuplicateDatasetItem(**d.to_dict()) for d in duplicate_results]
+
+        total_pairs = (len(dfs) * (len(dfs) - 1)) // 2
+        exact_count = sum(1 for i in items if i.status_level == "EXACT_DUPLICATE")
+        potential_count = sum(1 for i in items if i.status_level == "POTENTIAL_DUPLICATE")
+        partial_count = sum(1 for i in items if i.status_level == "PARTIAL_OVERLAP")
+
+        summary = {
+            "datasets_evaluated": len(dfs),
+            "total_pairs_evaluated": total_pairs,
+            "exact_duplicates": exact_count,
+            "potential_duplicates": potential_count,
+            "partial_overlaps": partial_count,
+        }
+
+        return DuplicateDetectResponse(
+            total_pairs_evaluated=total_pairs,
+            duplicates_detected_count=len(items),
+            duplicate_datasets=items,
+            summary=summary,
         )
 
     @classmethod
@@ -458,7 +521,8 @@ class RelationshipService:
 
         if custom_dataset_name and custom_dataset_name.strip():
             raw_stem = Path(custom_dataset_name.strip()).stem
-            target_name = f"{re.sub(r'[^a-zA-Z0-9_\-]', '_', raw_stem)}.csv"
+            clean_stem = re.sub(r"[^a-zA-Z0-9_-]", "_", raw_stem)
+            target_name = f"{clean_stem}.csv"
         else:
             target_name = f"joined_{left_stem}_{right_stem}_{join_how}.csv"
 

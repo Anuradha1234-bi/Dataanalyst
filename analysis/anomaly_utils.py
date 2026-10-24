@@ -18,7 +18,7 @@ class AnomalyUtils:
     """Helper utilities for tabular feature suitability, filtering, and explanation."""
 
     ID_REGEX = re.compile(
-        r"^(id|index|row_?num(ber)?|row_?id|record_?id|trans(action)?_?id|order_?id|cust(omer)?_?id|user_?id|account_?id|invoice_?id)$",
+        r"^(id|index|row_?num(ber)?|row_?id|record_?id|trans(action)?_?id|order_?id|cust(omer)?_?id|user_?id|account_?id|invoice_?id|client_?id|patient_?id|employee_?id|member_?id|student_?id|product_?id|item_?id|sku(_?id)?|store_?id|vendor_?id|session_?id|device_?id)$",
         re.IGNORECASE,
     )
 
@@ -28,21 +28,41 @@ class AnomalyUtils:
     )
 
     @classmethod
+    def get_column_base_name(cls, col_name: str) -> str:
+        """Strip dataset cleaning, joining, and duplicate numbering suffixes to reveal base semantic feature name."""
+        c = str(col_name).strip()
+        prev = None
+        while c != prev:
+            prev = c
+            c = re.sub(r"\s*\(\d+\)$", "", c).strip()
+            c = re.sub(r"\.\d+$", "", c).strip()
+            c = re.sub(
+                r"(_clean_[a-zA-Z0-9_]+|_cleaned|_clean|_copy|_dup|_duplicate|_left|_right)$",
+                "",
+                c,
+                flags=re.IGNORECASE,
+            ).strip()
+            c = re.sub(r"__\d+$", "", c).strip()
+        return c
+
+    @classmethod
     def is_id_or_index_column(cls, series: pd.Series, col_name: str) -> Tuple[bool, str]:
         """Determine whether a column represents an ID, index, or technical artifact."""
         col_clean = str(col_name).strip()
         col_lower = col_clean.lower()
+        col_base = cls.get_column_base_name(col_clean)
+        col_base_lower = col_base.lower()
 
         # 1. Unnamed or obvious index column
-        if col_lower.startswith("unnamed") or col_lower in ("index", "level_0"):
+        if col_lower.startswith("unnamed") or col_lower in ("index", "level_0") or col_base_lower in ("index", "level_0"):
             return True, "Automated or unnamed CSV index column"
 
         # 2. Obvious ID names
-        if cls.ID_REGEX.match(col_lower):
+        if cls.ID_REGEX.match(col_lower) or cls.ID_REGEX.match(col_base_lower):
             return True, f"Identified as identifier column by name pattern '{col_name}'"
 
-        if cls.ID_SUFFIX_REGEX.search(col_lower) and not any(
-            val_kw in col_lower for val_kw in ["paid", "valid", "pyramid", "fluid", "solid", "rapid", "grid"]
+        if (cls.ID_SUFFIX_REGEX.search(col_lower) or cls.ID_SUFFIX_REGEX.search(col_base_lower)) and not any(
+            val_kw in col_lower for val_kw in ["paid", "valid", "pyramid", "fluid", "solid", "rapid", "grid", "humid", "lipid", "acid", "hybrid"]
         ):
             non_null = series.dropna()
             if len(non_null) > 0 and (non_null.nunique() / len(non_null)) > 0.4:
@@ -63,7 +83,7 @@ class AnomalyUtils:
         # 4. 100% unique integer sequence with reference name
         if pd.api.types.is_numeric_dtype(series) and len(non_null) >= 10:
             if non_null.nunique() == len(series) and (non_null == non_null.round()).all():
-                if any(w in col_lower for w in ["num", "no", "code", "key", "ref"]):
+                if any(w in col_lower for w in ["num", "no", "code", "key", "ref"]) or any(w in col_base_lower for w in ["num", "no", "code", "key", "ref"]):
                     return True, "100% unique integer sequence with reference name"
 
         return False, ""

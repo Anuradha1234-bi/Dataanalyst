@@ -2,7 +2,7 @@
 
 import datetime
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from fastapi import HTTPException, status
 import pandas as pd
 import numpy as np
@@ -34,8 +34,145 @@ class DataQualityService:
     """Calculates granular quality metrics, hygiene warnings, and structural scores."""
 
     @classmethod
-    def analyze_dataset_quality(cls, dataset: Dataset) -> DataQualityResponse:
-        file_path = Path(dataset.file_path)
+    def calculate_quality_score(cls, df: pd.DataFrame) -> Tuple[float, str, str, Dict[str, Any]]:
+        """Authoritative Data Quality Score calculation method.
+
+        Evaluates structural hygiene on a 0-100 scale using deterministic penalties:
+          - Missing cells: up to 35.0 pts (missing_pct * 1.5)
+          - Duplicate rows: up to 20.0 pts (duplicate_pct * 1.0)
+          - Completely empty rows: 2.0 pts per row
+          - Completely empty columns: 10.0 pts per column
+          - Constant columns: 8.0 pts per column
+          - Near-constant columns: 4.0 pts per column
+          - Mixed type columns: 5.0 pts per column
+          - Null-like tokens (e.g. 'nan', 'null', 'n/a'): up to 8.0 pts (1.5 pts per unique token)
+
+        Returns:
+            Tuple of (quality_score, overall_status, status_message, issue_details)
+        """
+        if df is None or df.empty or len(df) == 0:
+            return 0.0, "Poor", "Dataset is empty.", {"total_rows": 0, "total_columns": 0}
+
+        total_rows = int(len(df))
+        total_cols = int(len(df.columns))
+        total_cells = total_rows * total_cols
+
+        total_missing = int(df.isnull().sum().sum())
+        missing_pct = round((total_missing / total_cells * 100), 2) if total_cells > 0 else 0.0
+
+        duplicate_rows = int(df.duplicated().sum())
+        duplicate_pct = round((duplicate_rows / total_rows * 100), 2) if total_rows > 0 else 0.0
+
+        empty_rows_count = int(df.isnull().all(axis=1).sum())
+        empty_cols_count = sum(1 for col in df.columns if df[col].isnull().all())
+
+        constant_cols_count = 0
+        near_constant_cols_count = 0
+        mixed_type_cols_count = 0
+        null_like_tokens_detected = set()
+        formatting_issues_count = 0
+
+        for col in df.columns:
+            series = df[col]
+            non_null = series.dropna()
+            non_null_count = len(non_null)
+            if non_null_count == 0:
+                continue
+
+            unique_c = int(non_null.nunique())
+            if unique_c == 1:
+                constant_cols_count += 1
+            elif unique_c == 2 and total_rows >= 10:
+                val_counts = non_null.value_counts()
+                if len(val_counts) > 0 and (val_counts.iloc[0] / non_null_count) >= 0.95:
+                    near_constant_cols_count += 1
+
+            if series.dtype == object:
+                s_str = non_null.astype(str).str.strip().str.lower()
+                for token in NULL_LIKE_TOKENS:
+                    if (s_str == token).any():
+                        null_like_tokens_detected.add(token)
+
+                has_curr = bool(s_str.str.contains(r'[$₹€£¥%]|,\d{3}', regex=True).any())
+                if has_curr:
+                    formatting_issues_count += 1
+                cleaned_num = s_str.str.replace(r'[$₹€£¥%,\s]', '', regex=True)
+                parsed = pd.to_numeric(cleaned_num, errors='coerce')
+                valid_num_count = int(parsed.notnull().sum())
+                if valid_num_count > 0 and valid_num_count < non_null_count and (valid_num_count / non_null_count) >= 0.2:
+                    mixed_type_cols_count += 1
+
+        penalty = 0.0
+        penalty += min(35.0, missing_pct * 1.5)
+        penalty += min(20.0, duplicate_pct * 1.0)
+        penalty += empty_rows_count * 2.0
+        penalty += empty_cols_count * 10.0
+        penalty += constant_cols_count * 8.0
+        penalty += near_constant_cols_count * 4.0
+        penalty += mixed_type_cols_count * 5.0
+        if len(null_like_tokens_detected) > 0:
+            penalty += min(8.0, len(null_like_tokens_detected) * 1.5)
+
+        quality_score = max(0.0, min(100.0, round(100.0 - penalty, 1)))
+
+        quality_issues_count = (
+            (1 if duplicate_rows > 0 else 0)
+            + int((df.isnull().sum() > 0).sum())
+            + empty_rows_count
+            + empty_cols_count
+            + constant_cols_count
+            + near_constant_cols_count
+            + mixed_type_cols_count
+            + (1 if len(null_like_tokens_detected) > 0 else 0)
+            + (1 if formatting_issues_count > 0 else 0)
+        )
+
+        if quality_score < 60.0 or missing_pct >= 25.0 or empty_cols_count > 0 or empty_rows_count > 0:
+            overall_status = "Poor"
+            status_msg = f"Dataset exhibits significant quality degradation (Score: {quality_score}/100) with {quality_issues_count} total detected issues."
+        elif quality_issues_count > 0 or quality_score < 85.0:
+            overall_status = "Needs Attention"
+            status_msg = f"Dataset is mostly usable (Score: {quality_score}/100), but contains {quality_issues_count} hygiene issues."
+        else:
+            overall_status = "Good"
+            status_msg = f"Dataset is clean and well-structured (Score: {quality_score}/100) with 0 detected hygiene issues."
+
+        details = {
+            "total_rows": total_rows,
+            "total_columns": total_cols,
+            "total_cells": total_cells,
+            "missing_cells": total_missing,
+            "missing_percentage": missing_pct,
+            "duplicate_rows": duplicate_rows,
+            "duplicate_percentage": duplicate_pct,
+            "empty_rows": empty_rows_count,
+            "empty_columns": empty_cols_count,
+            "constant_columns": constant_cols_count,
+            "near_constant_columns": near_constant_cols_count,
+            "mixed_type_columns": mixed_type_cols_count,
+            "null_like_tokens": list(null_like_tokens_detected),
+            "quality_issues_count": quality_issues_count,
+            "penalty": round(penalty, 2),
+        }
+        return quality_score, overall_status, status_msg, details
+
+    @classmethod
+    def analyze_dataset_quality(
+        cls,
+        dataset: Dataset,
+        active: bool = True,
+        version: Optional[str] = "original",
+    ) -> DataQualityResponse:
+        v_lower = (version or "original").lower().strip()
+        if v_lower == "cleaned":
+            if dataset.has_cleaned and dataset.cleaned_file_path:
+                p = Path(dataset.cleaned_file_path)
+                file_path = p if (p.exists() and p.is_file()) else Path(dataset.file_path)
+            else:
+                file_path = Path(dataset.file_path)
+        else:
+            file_path = Path(dataset.file_path)
+
         if not file_path.exists() or not file_path.is_file():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,

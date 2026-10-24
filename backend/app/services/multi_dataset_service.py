@@ -124,17 +124,35 @@ class MultiDatasetAnalysisService:
         for ds in db_datasets:
             ds_name = ds.original_filename or ds.filename or f"dataset_{ds.id}"
             try:
-                # Check physical file
-                fpath = Path(ds.file_path)
-                if not fpath.exists() or not fpath.is_file():
+                # Check physical file with safe active/cleaned resolution and path fallback
+                resolved_fpath = None
+                candidates = []
+                if ds.has_cleaned and ds.cleaned_file_path:
+                    candidates.append(Path(ds.cleaned_file_path))
+                if ds.file_path:
+                    candidates.append(Path(ds.file_path))
+
+                for cand in candidates:
+                    if cand.exists() and cand.is_file():
+                        resolved_fpath = cand
+                        break
+                    if not cand.is_absolute():
+                        cand_b = Path("backend") / cand
+                        if cand_b.exists() and cand_b.is_file():
+                            resolved_fpath = cand_b
+                            break
+
+                if not resolved_fpath:
                     errors.append(
                         DatasetAnalysisError(
                             dataset_id=ds.id,
                             dataset_name=ds_name,
-                            error=f"File '{ds_name}' is missing from storage.",
+                            error=f"File '{ds_name}' is missing from storage. Please re-upload this dataset or remove it from your selection to proceed.",
                         )
                     )
                     continue
+
+                fpath = resolved_fpath
 
                 # Load DataFrame
                 load_res = FileLoader.load_file(
@@ -153,8 +171,8 @@ class MultiDatasetAnalysisService:
                     )
                     continue
 
-                # Compute Profile
-                profile = ProfilingService.get_dataset_profile(ds)
+                # Compute Profile (respecting active cleaned version)
+                profile = ProfilingService.get_dataset_profile(ds, active=True)
                 individual_profiles[ds.id] = profile
                 loaded_dfs[ds_name] = load_res.df
 

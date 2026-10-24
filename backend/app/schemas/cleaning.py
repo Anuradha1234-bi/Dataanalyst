@@ -391,6 +391,7 @@ class CleaningDashboardSummaryResponse(BaseModel):
     last_updated: Optional[str] = None
     cleaning_status: str  # "Not Cleaned" | "Partially Cleaned" | "Cleaned" | "Needs Review"
     cleaning_score: int  # 0 - 100
+    quality_score: Optional[int] = None  # Authoritative absolute dataset quality score (0 - 100)
     score_deductions: List[str] = Field(default_factory=list)
     score_status: Optional[str] = "GOOD"  # "CLEAN", "GOOD", "NEEDS REVIEW", "CRITICAL"
     component_scores: Dict[str, float] = Field(default_factory=dict)

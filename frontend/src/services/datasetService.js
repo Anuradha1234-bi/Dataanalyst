@@ -20,13 +20,23 @@ export const datasetService = {
   /**
    * Retrieve statistical distribution profiling and data hygiene report for a dataset.
    */
-  async getDatasetQuality(id) {
-    const response = await api.get(`/datasets/${id}/quality`);
+  async getDatasetQuality(id, version = 'original') {
+    const response = await api.get(`/datasets/${id}/quality`, {
+      params: { version },
+    });
     return response.data;
   },
 
   async getDatasetProfile(id) {
     const response = await api.get(`/datasets/${id}/profile`);
+    return response.data;
+  },
+
+  /**
+   * Retrieve sample 5-row preview and missing values metadata for a dataset.
+   */
+  async getDatasetPreview(id) {
+    const response = await api.get(`/datasets/${id}/preview`);
     return response.data;
   },
 

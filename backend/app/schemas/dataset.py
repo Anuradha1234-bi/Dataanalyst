@@ -23,11 +23,28 @@ class DatasetResponse(BaseModel):
     columns: int  # Alias for backward compatibility
     column_names: Optional[List[str]] = Field(default_factory=list)
     has_cleaned: bool = False
+    preview_rows: Optional[List[Dict[str, Any]]] = None
+    total_missing_cells: Optional[int] = None
+    missing_columns: Optional[List[Dict[str, Any]]] = None
     created_at: datetime
     updated_at: datetime
 
     class Config:
         from_attributes = True
+
+
+class DatasetPreviewResponse(BaseModel):
+    """Schema for dataset preview records and missing values."""
+
+    id: int
+    filename: str
+    file_type: str
+    rows: int
+    columns: int
+    column_names: List[str] = Field(default_factory=list)
+    preview_rows: List[Dict[str, Any]] = Field(default_factory=list)
+    total_missing_cells: int = 0
+    missing_columns: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class DatasetFailedUpload(BaseModel):

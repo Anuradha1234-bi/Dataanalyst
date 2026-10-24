@@ -1,0 +1,131 @@
+/**
+ * ============================================================================
+ * AI Data Analyst Agent - Mobile & Tablet Responsive Stylesheet
+ * File: frontend/src/responsive.css
+ *
+ * SCOPE & ARCHITECTURE:
+ * - Purely additive responsive layer targeting mobile (<640px) and tablet (<1024px) viewports.
+ * - ALL rules are strictly encapsulated within @media (max-width: ...) queries.
+ * - ZERO impact on desktop viewports (>= 1024px and 1440px).
+ * - Matches exact DOM elements and verified Tailwind utility classes without inventing names.
+ * - Preserves approved deep green theme, card dimensions, and desktop typography.
+ * ============================================================================
+ */
+
+/* --------------------------------------------------------------------------
+   1. TABLET & MOBILE SHARED VIEWPORT ADAPTATIONS (max-width: 1023px)
+   -------------------------------------------------------------------------- */
+@media (max-width: 1023px) {
+  /* Inertial momentum scrolling for native tables & chart wrappers */
+  .overflow-x-auto {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   2. MOBILE PHONES (max-width: 639px)
+   -------------------------------------------------------------------------- */
+@media (max-width: 639px) {
+  /* Fluid typography scaling for KPI metric numbers to avoid boundary crowding */
+  .grid.grid-cols-2.lg\:grid-cols-5 .text-xl.sm\:text-2xl {
+    font-size: clamp(1.125rem, 4.5vw, 1.5rem);
+    line-height: 1.25;
+  }
+
+  /* Filter dropdown containers with static pixel min-widths flex adaptively */
+  .relative.min-w-\[220px\],
+  .relative.min-w-\[240px\] {
+    min-width: 0;
+    width: 100%;
+    max-width: 100%;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   3. COMPACT MOBILE & MODAL ACTIONS (max-width: 480px)
+   -------------------------------------------------------------------------- */
+@media (max-width: 480px) {
+  /* Modal dialog footers: stack action buttons full-width */
+  div[role="dialog"] form > div.pt-2.flex.items-center.justify-end {
+    flex-direction: column-reverse;
+    gap: 0.5rem;
+    width: 100%;
+  }
+
+  div[role="dialog"] form > div.pt-2.flex.items-center.justify-end > button {
+    width: 100%;
+    justify-content: center;
+  }
+
+  /* Welcome banner action buttons wrap cleanly on narrow screens */
+  .flex.flex-wrap.items-center.gap-2\.5.sm\:gap-3 > button.whitespace-nowrap {
+    white-space: normal;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   4. STANDARD MOBILE SCREENS (max-width: 430px - iPhone 14 Pro Max / Pixel 7)
+   -------------------------------------------------------------------------- */
+@media (max-width: 430px) {
+  /* Constrain navbar active dataset name truncation to prevent header overflow */
+  header button[aria-label="Select active dataset"] span {
+    max-width: 80px;
+  }
+
+  /* Reduce spacing between top navbar control icons */
+  header .flex.items-center.gap-2.sm\:gap-3 {
+    gap: 0.375rem;
+  }
+
+  /* Narrow chart metric dropdown selects in card headers */
+  select.max-w-\[120px\] {
+    max-width: 90px;
+  }
+
+  /* Sign-in footer contact links break gracefully if needed */
+  footer[aria-label="Sign-in page footer"] a span {
+    word-break: break-all;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   5. NARROW MOBILE SCREENS (max-width: 380px - iPhone SE / 375px)
+   -------------------------------------------------------------------------- */
+@media (max-width: 380px) {
+  /* Transition 5-metric KPI row to single column to guarantee zero overlap */
+  .grid.grid-cols-2.lg\:grid-cols-5 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .grid.grid-cols-2.lg\:grid-cols-5 > .col-span-2 {
+    grid-column: span 1 / span 1;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   6. ULTRA-COMPACT MOBILE SCREENS (max-width: 360px - 320px Viewports)
+   -------------------------------------------------------------------------- */
+@media (max-width: 360px) {
+  /* Tighten top navbar horizontal padding */
+  header.h-14 {
+    padding-left: 0.5rem;
+    padding-right: 0.5rem;
+  }
+
+  /* Tighten main content padding to maximize usable card surface */
+  main.p-4 {
+    padding-left: 0.5rem;
+    padding-right: 0.5rem;
+  }
+
+  /* Dataset selector label further tightened for 320px */
+  header button[aria-label="Select active dataset"] span {
+    max-width: 60px;
+  }
+
+  /* Ensure slide-in navigation drawer does not exceed available width */
+  aside.fixed.z-50 {
+    max-width: calc(100vw - 44px);
+  }
+}

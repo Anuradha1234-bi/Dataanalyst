@@ -116,9 +116,10 @@ class AnomalyService:
         dataset_id: int,
         version: str = "original",
     ) -> NumericColumnsResponse:
-        """Retrieve available numeric features and exclusion notes for a dataset."""
+        """Retrieve available numeric features, duplicate column groups, and exclusion notes."""
         dataset, df, actual_version, _ = cls._get_user_dataset_df(db, current_user, dataset_id, version)
         suitable, excluded_ids, excluded_other = AnomalyTool.identify_suitable_features(df)
+        canonical_to_dups, _ = AnomalyTool.detect_duplicate_numerical_columns(df, columns=suitable)
 
         ds_name = dataset.original_filename or dataset.filename or f"dataset_{dataset.id}"
         return NumericColumnsResponse(
@@ -128,6 +129,7 @@ class AnomalyService:
             total_rows=len(df),
             suitable_numeric_columns=suitable,
             excluded_columns=excluded_ids + excluded_other,
+            duplicate_columns=canonical_to_dups,
         )
 
     @classmethod
@@ -166,6 +168,26 @@ class AnomalyService:
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="None of the specified columns are numeric.",
                 )
+            # Filter out identifier columns from requested columns
+            id_exclusions = []
+            filtered_numeric_cols = []
+            for c in target_numeric_cols:
+                is_id, reason = AnomalyTool.is_id_or_index_column(df[c], c)
+                if is_id:
+                    id_exclusions.append(f"{c} ({reason})")
+                else:
+                    filtered_numeric_cols.append(c)
+
+            if id_exclusions:
+                warnings.append(
+                    f"Excluded {len(id_exclusions)} identifier column(s) from anomaly detection feature inputs: {', '.join(id_exclusions)}."
+                )
+            if not filtered_numeric_cols:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"All specified columns were identified as identifiers or non-numeric: {', '.join(id_exclusions)}.",
+                )
+            target_numeric_cols = filtered_numeric_cols
         else:
             target_numeric_cols = suitable_cols
 
@@ -182,6 +204,16 @@ class AnomalyService:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Contamination rate must be between 0.001 and 0.5. Received {contamination}.",
+            )
+
+        # Detect exact duplicate numerical columns among analyzed features
+        canonical_to_dups, dup_to_canonical = AnomalyTool.detect_duplicate_numerical_columns(
+            df, columns=target_numeric_cols
+        )
+        if dup_to_canonical:
+            dup_details = [f"'{dup}' (duplicate of '{can}')" for dup, can in dup_to_canonical.items()]
+            warnings.append(
+                f"Detected {len(dup_to_canonical)} exact duplicate numerical column(s): {', '.join(dup_details)}."
             )
 
         # 1. IQR Univariate Detection
@@ -213,7 +245,16 @@ class AnomalyService:
                     outlier_indices=r.outlier_indices,
                     min_val=r.min_val,
                     max_val=r.max_val,
+                    valid_count=getattr(r, "valid_count", 0),
+                    missing_count=getattr(r, "missing_count", 0),
+                    total_rows=getattr(r, "total_rows", 0),
+                    evaluation_note=getattr(r, "evaluation_note", None),
                 )
+                if getattr(r, "missing_count", 0) > 0:
+                    warnings.append(
+                        f"Feature '{col}' has {r.missing_count} missing value(s) excluded from its IQR denominator "
+                        f"({r.valid_count}/{r.total_rows} rows evaluated; outlier rate is {r.outlier_pct}% based on valid observations)."
+                    )
                 for idx in r.outlier_indices:
                     if idx not in iqr_flagged_map:
                         iqr_flagged_map[idx] = []
@@ -226,6 +267,7 @@ class AnomalyService:
                 outlier_rate=iqr_result.outlier_rate,
                 all_outlier_indices=iqr_result.all_outlier_indices,
                 multiplier=iqr_result.multiplier,
+                duplicate_columns=iqr_result.duplicate_columns,
             )
 
         # 2. Isolation Forest Multivariate Detection
@@ -233,18 +275,25 @@ class AnomalyService:
         if_flagged_map: Dict[Any, Tuple[float, str]] = {}  # index -> (score, label)
 
         if method in ("isolation_forest", "both"):
-            if len(target_numeric_cols) < 2:
+            # Determine candidate features respecting duplicate exclusion option
+            exclude_dups = getattr(request, "exclude_duplicates", True)
+            if exclude_dups and dup_to_canonical:
+                features_candidate = [c for c in target_numeric_cols if c not in dup_to_canonical]
+            else:
+                features_candidate = target_numeric_cols
+
+            if len(features_candidate) < 2:
                 if method == "isolation_forest":
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail=(
-                            f"Isolation Forest requires at least 2 numerical features for multivariate analysis. "
-                            f"Only {len(target_numeric_cols)} feature(s) available ({', '.join(target_numeric_cols)})."
+                            f"Isolation Forest requires at least 2 non-duplicate numerical features for multivariate analysis. "
+                            f"Only {len(features_candidate)} eligible feature(s) available ({', '.join(features_candidate)})."
                         ),
                     )
                 else:
                     warnings.append(
-                        f"Skipped Isolation Forest: requires at least 2 numerical features (found {len(target_numeric_cols)})."
+                        f"Skipped Isolation Forest: requires at least 2 non-duplicate numerical features (found {len(features_candidate)})."
                     )
             elif len(df) < 5:
                 if method == "isolation_forest":
@@ -262,10 +311,11 @@ class AnomalyService:
                         contamination=contamination,
                         random_state=request.random_state,
                         dataset_name=ds_name,
+                        exclude_duplicates=exclude_dups,
                     )
 
-                    for idx in if_res.anomaly_indices:
-                        pos = df.index.get_loc(idx)
+                    for pos in getattr(if_res, "anomaly_positions", [df.index.get_loc(idx) for idx in if_res.anomaly_indices]):
+                        idx = df.index[pos]
                         score = if_res.anomaly_scores[pos]
                         label = if_res.anomaly_labels[pos]
                         if_flagged_map[idx] = (score, label)
@@ -287,7 +337,10 @@ class AnomalyService:
                         )
                     warnings.append(f"Isolation Forest could not run: {str(e)}")
 
-        # 3. Combine Flagged Records (Deduplicated)
+        # 3. Combine Flagged Records (Deduplicated Union across enabled methods)
+        iqr_unique_records = len(iqr_flagged_map.keys())
+        if_unique_records = len(if_flagged_map.keys())
+        both_methods_records = len(set(iqr_flagged_map.keys()).intersection(set(if_flagged_map.keys())))
         all_flagged_indices = set(iqr_flagged_map.keys()).union(set(if_flagged_map.keys()))
         flagged_records: List[FlaggedRecordItem] = []
 
@@ -297,7 +350,7 @@ class AnomalyService:
         for idx in sorted_indices:
             row = df.loc[idx]
             pos = df.index.get_loc(idx)
-            row_num = pos + 1
+            row_num = (pos.item(0) if hasattr(pos, "item") else int(pos)) + 1 if not isinstance(pos, int) else pos + 1
 
             methods_for_row: List[str] = []
             flagged_cols: List[str] = []
@@ -365,6 +418,9 @@ class AnomalyService:
         if not methods_used_list:
             methods_used_list.append(method.title())
 
+        iqr_only = max(0, iqr_unique_records - both_methods_records)
+        if_only = max(0, if_unique_records - both_methods_records)
+
         summary = AnomalySummaryResponse(
             total_records_analyzed=total_rows,
             unique_flagged_records=unique_flagged,
@@ -374,6 +430,12 @@ class AnomalyService:
             dataset_id=dataset.id,
             dataset_name=ds_name,
             dataset_version=actual_version,
+            iqr_unique_records=iqr_unique_records,
+            isolation_forest_unique_records=if_unique_records,
+            both_methods_records=both_methods_records,
+            iqr_only_records=iqr_only,
+            isolation_forest_only_records=if_only,
+            duplicate_columns=canonical_to_dups,
         )
 
         # 5. Persist run to AnalysisHistory audit trail (preserving data integrity)
@@ -392,8 +454,9 @@ class AnomalyService:
                     "flagged_records": unique_flagged,
                     "flagged_percentage": flagged_pct,
                     "columns_analyzed": target_numeric_cols,
-                    "iqr_outliers": iqr_response.total_outlier_rows if iqr_response else 0,
-                    "isolation_forest_anomalies": if_response.anomaly_count if if_response else 0,
+                    "iqr_outliers": iqr_unique_records,
+                    "isolation_forest_anomalies": if_unique_records,
+                    "both_methods": both_methods_records,
                 }),
             )
             db.add(hist_entry)
@@ -408,6 +471,7 @@ class AnomalyService:
             isolation_forest_results=if_response,
             flagged_records=flagged_records,
             all_numeric_columns=target_numeric_cols,
+            duplicate_columns=canonical_to_dups,
             warnings=warnings,
             created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         )

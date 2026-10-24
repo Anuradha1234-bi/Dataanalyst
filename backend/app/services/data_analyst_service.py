@@ -8,13 +8,16 @@ import os
 import json
 import time
 import math
+import logging
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional,Tuple
 from datetime import datetime
 import pandas as pd
 import numpy as np
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, status
+
+logger = logging.getLogger("data_analyst_service")
 
 from app.models.dataset import Dataset
 from app.models.user import User
@@ -165,11 +168,14 @@ class DataAnalystService:
             pass
 
         meta_dict = {
+            "dataset_id": dataset.id,
             "column_names": [str(c) for c in df.columns],
             "data_types": {str(c): str(df[c].dtype) for c in df.columns},
             "rows": int(len(df)),
             "columns": int(len(df.columns)),
             "join_history": join_history,
+            "_df": df,
+            "df": df,
         }
 
         # 5. Check if user has other datasets for potential cross-dataset queries
@@ -181,17 +187,22 @@ class DataAnalystService:
         datasets_dict = {ds_name: df}
         meta_dict_all = {ds_name: meta_dict}
 
-        # Add other user datasets (read-only for cross-dataset referencing if needed)
+        # Add other user datasets without overwriting active dataset identity
         for od in other_datasets[:3]:
             od_path = Path(od.file_path)
             if od_path.exists():
                 od_load = FileLoader.load_file(str(od_path), od.filename, od.file_size_bytes or 0)
                 if od_load.success and od_load.df is not None:
-                    o_name = od.original_filename or od.filename or f"dataset_{od.id}"
+                    base_o_name = od.original_filename or od.filename or f"dataset_{od.id}"
+                    # Ensure unique dataset key so identical filenames never overwrite selected dataset
+                    o_name = base_o_name if base_o_name not in datasets_dict else f"{base_o_name} (#{od.id})"
                     datasets_dict[o_name] = od_load.df
                     meta_dict_all[o_name] = {
+                        "dataset_id": od.id,
                         "column_names": [str(c) for c in od_load.df.columns],
                         "data_types": {str(c): str(od_load.df[c].dtype) for c in od_load.df.columns},
+                        "_df": od_load.df,
+                        "df": od_load.df,
                     }
 
         # 6. Resolve conversation session context
@@ -255,19 +266,51 @@ class DataAnalystService:
                     result_type="scalar",
                 )
 
-        # 8. Format structured visualization specification
+        # 8. Format structured visualization specification from actual CSV calculations
         vis_payload = orch_resp.get("visualization", {})
         chart_data: Optional[ChartData] = None
 
         if vis_payload and vis_payload.get("recommended"):
-            chart_type = vis_payload.get("chart_type", "bar")
+            chart_type = str(vis_payload.get("chart_type") or "bar").lower()
             x_col = vis_payload.get("x")
             y_col = vis_payload.get("y")
             title = f"{chart_type.capitalize()} Chart: {request.question}"
 
             # Extract data points for native frontend chart rendering
             data_points: List[Dict[str, Any]] = []
-            if result_item and result_item.rows and x_col:
+            matrix = vis_payload.get("matrix") or orch_resp.get("evidence", {}).get("matrix")
+            categories = vis_payload.get("categories") or orch_resp.get("evidence", {}).get("categories")
+
+            if chart_type == "heatmap":
+                if not matrix or not categories:
+                    matrix = orch_resp.get("evidence", {}).get("matrix")
+                    categories = orch_resp.get("evidence", {}).get("categories")
+            elif chart_type == "histogram" and x_col and x_col in df.columns:
+                num_s = pd.to_numeric(df[x_col], errors="coerce").dropna()
+                if not num_s.empty:
+                    bins_cnt = min(10, max(4, num_s.nunique()))
+                    counts, bin_edges = np.histogram(num_s.values, bins=bins_cnt)
+                    for b_idx in range(len(counts)):
+                        b_label = f"{round(bin_edges[b_idx], 1)}-{round(bin_edges[b_idx+1], 1)}"
+                        data_points.append({
+                            "label": b_label,
+                            "value": int(counts[b_idx]),
+                        })
+            elif chart_type == "scatter" and x_col and y_col and x_col in df.columns and y_col in df.columns:
+                valid_scatter = df[[x_col, y_col]].dropna().head(60)
+                for _, s_row in valid_scatter.iterrows():
+                    try:
+                        sx = round(float(s_row[x_col]), 2)
+                        sy = round(float(s_row[y_col]), 2)
+                        data_points.append({
+                            "x": sx,
+                            "y": sy,
+                            "label": f"{sx}, {sy}",
+                            "value": sy,
+                        })
+                    except (ValueError, TypeError):
+                        pass
+            elif result_item and result_item.rows and x_col:
                 for row in result_item.rows[:30]:  # Limit to 30 bars/points
                     x_val = row.get(x_col)
                     y_val = row.get(y_col) if y_col else row.get(result_item.columns[1] if len(result_item.columns) > 1 else x_col)
@@ -285,9 +328,11 @@ class DataAnalystService:
                 recommended=True,
                 chart_type=chart_type,
                 title=title,
-                x_axis=str(x_col),
-                y_axis=str(y_col) if y_col else "",
+                x_axis=str(x_col) if x_col else None,
+                y_axis=str(y_col) if y_col else None,
                 data_points=data_points,
+                matrix=matrix,
+                categories=categories,
                 reason=vis_payload.get("reason"),
             )
 
@@ -442,20 +487,115 @@ class DataAnalystService:
             db.rollback()
 
         plan_obj = orch_resp.get("query_plan", {})
+        intent_val = plan_obj.get("intent") or orch_resp.get("intent", {}).get("intent", "Analysis")
         used_cols = []
+
         if plan_obj.get("column"):
             used_cols.append(plan_obj["column"])
+        if plan_obj.get("secondary_column") and plan_obj["secondary_column"] not in used_cols:
+            used_cols.append(plan_obj["secondary_column"])
         for gc in plan_obj.get("group_by", []):
             if gc and gc not in used_cols:
                 used_cols.append(gc)
-        if plan_obj.get("date_column") and plan_obj["date_column"] not in used_cols:
-            used_cols.append(plan_obj["date_column"])
 
-        op_name = plan_obj.get("intent") or orch_resp.get("intent", {}).get("intent", "Analysis")
+        # For correlation without explicit columns in plan, extract the pair from evidence
+        if intent_val == "CORRELATION" and not used_cols:
+            ev_corr = orch_resp.get("evidence", {}).get("raw_evidence", {}) or orch_resp.get("evidence", {})
+            st_pair = ev_corr.get("strongest_pair", {})
+            if st_pair:
+                c1 = st_pair.get("Feature A") or st_pair.get("column_a")
+                c2 = st_pair.get("Feature B") or st_pair.get("column_b")
+                if c1 and c1 not in used_cols:
+                    used_cols.append(c1)
+                if c2 and c2 not in used_cols:
+                    used_cols.append(c2)
+
+        # For missing values, extract columns with missing values if none explicitly set
+        if intent_val == "MISSING_VALUES" and not used_cols:
+            ev_mv = orch_resp.get("evidence", {}).get("raw_evidence", {}) or orch_resp.get("evidence", {})
+            cols_mv = ev_mv.get("columns_with_missing", [])
+            for c in cols_mv[:3]:
+                if c and c not in used_cols:
+                    used_cols.append(c)
+
+        # ONLY add date_column if temporal analysis was actually performed or date is explicitly in question
+        if plan_obj.get("date_column") and plan_obj["date_column"] not in used_cols:
+            is_date_op = (
+                intent_val in ("TREND", "DATE_RANGE", "DATE_COMPARISON", "PERCENTAGE_CHANGE")
+                or bool(plan_obj.get("date_range"))
+                or (plan_obj["date_column"].lower() in request.question.lower() or plan_obj["date_column"].lower().replace("_", " ") in request.question.lower())
+            )
+            if is_date_op:
+                used_cols.append(plan_obj["date_column"])
+
+        op_name = intent_val
         op_display = op_name.replace("_", " ").title() if op_name else "Analysis"
-        interp_q = orch_resp.get("question") or request.question
-        if used_cols:
+
+        # Construct concise, professional interpreted question
+        interp_q = request.question
+        if op_name == "COUNT":
+            if used_cols:
+                interp_q = f"Count of {', '.join(used_cols)} in {ds_name}"
+            else:
+                interp_q = f"Row count of {ds_name}"
+        elif op_name == "STANDARD_DEVIATION":
+            op_display = "Standard Deviation"
+            if used_cols:
+                interp_q = f"Sample Standard Deviation of {', '.join(used_cols)} in {ds_name}"
+            else:
+                interp_q = f"Sample Standard Deviation in {ds_name}"
+        elif op_name == "OUT_OF_SCOPE":
+            interp_q = request.question
+            op_display = "Out of Scope"
+            used_cols = []
+        elif op_name == "UNSUPPORTED_OPERATION":
+            uop = (
+                orch_resp.get("query_plan", {}).get("metadata", {}).get("unsupported_operation")
+                or orch_resp.get("result", {}).get("evidence", {}).get("unsupported_operation")
+                or "Requested Operation"
+            )
+            op_display = f"Unsupported: {str(uop).title()}"
+            if used_cols:
+                interp_q = f"Unsupported operation '{uop}' requested on {', '.join(used_cols)} in {ds_name}"
+            else:
+                interp_q = f"Unsupported operation '{uop}' in {ds_name}"
+        elif op_name == "DATA_TYPES":
+            interp_q = f"Column and feature overview of {ds_name}"
+        elif op_name == "MISSING_VALUES":
+            interp_q = f"Missing value analysis across columns in {ds_name}"
+        elif op_name == "INSIGHT_SUMMARY":
+            interp_q = f"Dataset summary and key patterns in {ds_name}"
+        elif op_name == "CORRELATION":
+            if used_cols:
+                interp_q = f"Correlation between {', '.join(used_cols)} in {ds_name}"
+            else:
+                interp_q = f"Pairwise correlation analysis across numerical columns in {ds_name}"
+        elif op_name == "UNKNOWN" or op_status == "error":
+            interp_q = request.question
+            op_display = "Clarification Needed" if op_status != "error" else "Query Unmapped"
+            used_cols = []
+        elif used_cols:
             interp_q = f"{op_display} of {', '.join(used_cols)} in {ds_name}"
+        else:
+            interp_q = f"{op_display} in {ds_name}"
+
+        # Diagnostic logging for query routing without sensitive data
+        fallback_reason = (
+            orch_resp.get("query_plan", {}).get("metadata", {}).get("reason")
+            or orch_resp.get("intent", {}).get("reason")
+            or "None"
+        )
+        logger.info(
+            "Query processed: dataset_id=%s version=%s intent=%s op=%s resolved_columns=%s status=%s fallback_reason=%s duration_ms=%s",
+            dataset.id,
+            actual_version_used,
+            intent_val,
+            op_name,
+            used_cols,
+            op_status,
+            fallback_reason,
+            exec_duration,
+        )
 
         return AnalysisAskResponse(
             status=op_status,

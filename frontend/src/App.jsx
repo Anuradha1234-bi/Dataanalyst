@@ -1,6 +1,7 @@
 import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider } from './context/AuthContext';
+import { ThemeProvider } from './context/ThemeContext';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { MainLayout } from './layouts/MainLayout';
 import { AuthLayout } from './layouts/AuthLayout';
@@ -24,11 +25,13 @@ import { ReportsPage } from './pages/ReportsPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { HistoryPage } from './pages/HistoryPage';
 import { ProfilePage } from './pages/ProfilePage';
+import { VisualizationPage } from './pages/VisualizationPage';
 
 export function App() {
   return (
-    <BrowserRouter>
-      <AuthProvider>
+    <ThemeProvider>
+      <BrowserRouter>
+        <AuthProvider>
         <Routes>
           {/* Public Auth Routes */}
           <Route element={<AuthLayout />}>
@@ -50,6 +53,8 @@ export function App() {
             <Route path="/dashboard" element={<DashboardPage />} />
             <Route path="/upload" element={<UploadPage />} />
             <Route path="/datasets" element={<DatasetsPage />} />
+            <Route path="/visualize" element={<VisualizationPage />} />
+            <Route path="/visualization" element={<VisualizationPage />} />
 
             {/* DATA Group */}
             <Route path="/profile-data" element={<ProfilingPage />} />
@@ -83,6 +88,7 @@ export function App() {
         </Routes>
       </AuthProvider>
     </BrowserRouter>
+    </ThemeProvider>
   );
 }
 

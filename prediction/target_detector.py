@@ -47,14 +47,24 @@ class TargetDetector:
 
         for col in df.columns:
             series = df[col]
-            col_lower = str(col).lower()
+            col_str = str(col).strip()
+            col_lower = col_str.lower()
+
+            # Skip personal identifiers, names, and emails from target recommendation unless explicitly named 'target' or 'label'
+            is_explicit_target_label = col_lower in ["target", "label", "dependent_variable", "y"]
+            is_personal_info = any(
+                col_lower == p or col_lower.endswith(f"_{p}") or col_lower.startswith(f"{p}_")
+                for p in ["customer_name", "user_name", "client_name", "username", "name", "full_name", "first_name", "last_name", "email", "e_mail", "mail"]
+            )
+            if is_personal_info and not is_explicit_target_label:
+                continue
 
             # Skip obvious technical index and identifier columns
-            is_id, id_reason = AnomalyUtils.is_id_or_index_column(series, str(col))
-            if is_id:
-                has_semantic_meaning = any(kw in col_lower for kw in TARGET_KEYWORDS + CONTINUOUS_KEYWORDS + ["target", "label"])
+            is_id, id_reason = AnomalyUtils.is_id_or_index_column(series, col_str)
+            if is_id and not is_explicit_target_label:
+                has_semantic_meaning = any(kw in col_lower for kw in TARGET_KEYWORDS + CONTINUOUS_KEYWORDS)
                 is_pure_sequential = "sequential integer" in id_reason.lower()
-                if not (has_semantic_meaning and is_pure_sequential) and not any(kw == col_lower for kw in ["target", "label"]):
+                if not (has_semantic_meaning and is_pure_sequential):
                     continue
 
             unique_cnt = series.nunique(dropna=True)
@@ -70,7 +80,7 @@ class TargetDetector:
             score = 0.50
 
             # Boost if name matches business target keyword
-            if col_lower in ["target", "label", "result", "outcome", "cgpa"]:
+            if is_explicit_target_label:
                 score += 0.40
                 reasons.append(f"Column name explicitly specifies target variable '{col_lower}'")
             else:
@@ -139,7 +149,7 @@ class TargetDetector:
                 else:
                     prob_type = ProblemType.REGRESSION
                     reasons.append("Continuous numeric measure with adequate variance")
-                    score += 0.10
+                    score += 0.15
 
                 recommendations.append(
                     TargetRecommendation(
@@ -157,18 +167,34 @@ class TargetDetector:
                 or pd.api.types.is_object_dtype(series)
                 or pd.api.types.is_string_dtype(series)
             ):
-                # Safely check for numeric-string columns
-                non_null_s = series.dropna()
-                num_parsed = pd.to_numeric(non_null_s, errors="coerce") if len(non_null_s) > 0 else pd.Series(dtype=float)
-                is_numeric_string = len(num_parsed) > 0 and (num_parsed.notna().sum() / len(num_parsed)) >= 0.8
+                # Safely check for numeric-string columns (e.g. 'age' containing numbers mixed with 'unknown')
+                non_null_s = series.dropna().astype(str).str.strip()
+                cleaned_num_s = non_null_s.str.replace(r"^[\$,₹,€,£]", "", regex=True).str.replace(r"%$", "", regex=True).str.strip()
+                num_parsed = pd.to_numeric(cleaned_num_s, errors="coerce") if len(cleaned_num_s) > 0 else pd.Series(dtype=float)
+                valid_num_count = num_parsed.notna().sum()
+                num_ratio = (valid_num_count / len(non_null_s)) if len(non_null_s) > 0 else 0.0
+                is_numeric_string = len(non_null_s) > 0 and num_ratio >= 0.50 and valid_num_count >= 3
 
-                if 2 <= unique_cnt <= 15 and not is_numeric_string:
-                    prob_type = (
-                        ProblemType.BINARY_CLASSIFICATION
-                        if unique_cnt == 2
-                        else ProblemType.MULTICLASS_CLASSIFICATION
+                if is_numeric_string:
+                    valid_nums = num_parsed.dropna()
+                    num_unique = valid_nums.nunique()
+                    is_int_parsed = (
+                        len(valid_nums) > 0
+                        and ((valid_nums % 1 == 0) | np.isclose(valid_nums % 1, 0, atol=1e-7) | np.isclose(valid_nums % 1, 1, atol=1e-7)).all()
                     )
-                    reasons.append(f"Categorical classification target ({unique_cnt} classes)")
+                    is_continuous_named = any(kw in col_lower for kw in CONTINUOUS_KEYWORDS)
+
+                    if num_unique == 2:
+                        prob_type = ProblemType.BINARY_CLASSIFICATION
+                        reasons.append("Binary numeric target formatted as strings (2 distinct values)")
+                    elif 3 <= num_unique <= 10 and is_int_parsed and not is_continuous_named:
+                        prob_type = ProblemType.MULTICLASS_CLASSIFICATION
+                        reasons.append(f"Discrete categorical classes formatted as strings ({num_unique} unique values)")
+                    else:
+                        prob_type = ProblemType.REGRESSION
+                        reasons.append("Continuous numeric measure formatted as strings with potential sentinels")
+                        score += 0.05
+
                     recommendations.append(
                         TargetRecommendation(
                             column=str(col),
@@ -179,28 +205,32 @@ class TargetDetector:
                             unique_count=unique_cnt,
                         )
                     )
-                elif is_numeric_string and unique_cnt >= 2:
-                    is_int_parsed = (
-                        num_parsed.notna().all()
-                        and ((num_parsed % 1 == 0) | np.isclose(num_parsed % 1, 0, atol=1e-7) | np.isclose(num_parsed % 1, 1, atol=1e-7)).all()
+                elif 2 <= unique_cnt <= 20:
+                    # Categorical classification candidate: evaluate class sample distribution
+                    val_counts = non_null_s.value_counts()
+                    min_class_count = val_counts.min() if not val_counts.empty else 0
+                    rare_class = val_counts.idxmin() if not val_counts.empty else "N/A"
+
+                    prob_type = (
+                        ProblemType.BINARY_CLASSIFICATION
+                        if unique_cnt == 2
+                        else ProblemType.MULTICLASS_CLASSIFICATION
                     )
-                    is_continuous_named = any(kw in col_lower for kw in CONTINUOUS_KEYWORDS)
-                    if unique_cnt == 2:
-                        prob_type = ProblemType.BINARY_CLASSIFICATION
-                        reasons.append("Binary numeric target formatted as strings (2 distinct values)")
-                    elif 3 <= unique_cnt <= 10 and is_int_parsed and not is_continuous_named:
-                        prob_type = ProblemType.MULTICLASS_CLASSIFICATION
-                        reasons.append(f"Discrete categorical classes formatted as strings ({unique_cnt} unique values)")
+
+                    if min_class_count < 2:
+                        score -= 0.35
+                        reasons.append(
+                            f"Contains singleton class '{rare_class}' with only 1 sample (minimum 2 samples required for cross-validation)"
+                        )
                     else:
-                        prob_type = ProblemType.REGRESSION
-                        reasons.append("Continuous numeric measure formatted as strings")
-                        score += 0.10
+                        reasons.append(f"Categorical classification target ({unique_cnt} balanced classes)")
+                        score += 0.05
 
                     recommendations.append(
                         TargetRecommendation(
                             column=str(col),
                             problem_type=prob_type,
-                            score=min(1.0, round(score, 2)),
+                            score=max(0.10, min(1.0, round(score, 2))),
                             reasons=reasons,
                             missing_pct=missing_pct,
                             unique_count=unique_cnt,
@@ -209,7 +239,7 @@ class TargetDetector:
 
         # Sort recommendations by score descending, with column position as natural tie-breaker
         recommendations.sort(
-            key=lambda r: (r.score, df.columns.get_loc(r.column) if r.column in df.columns else 0),
+            key=lambda r: (r.score, -(df.columns.get_loc(r.column) if r.column in df.columns else 0)),
             reverse=True,
         )
         return recommendations

@@ -53,12 +53,47 @@ def detect_iqr_anomalies(
     else:
         target_cols = [c for c in columns if c in df.columns and pd.api.types.is_numeric_dtype(df[c])]
 
+    total_rows = len(df)
     column_results: Dict[str, IQROutlierColumnResult] = {}
     all_outlier_indices_set = set()
 
     for col in target_cols:
-        s = df[col].dropna()
-        if len(s) == 0:
+        col_series = df[col]
+        num_series = pd.to_numeric(col_series, errors="coerce")
+        finite_mask = num_series.notna() & np.isfinite(num_series.to_numpy(dtype=float, na_value=np.nan))
+        s = num_series[finite_mask]
+        valid_count = len(s)
+        missing_count = total_rows - valid_count
+
+        if missing_count > 0:
+            eval_note = (
+                f"Evaluated {valid_count} of {total_rows} values "
+                f"({missing_count} missing/non-finite observation(s) excluded from IQR denominator)."
+            )
+        else:
+            eval_note = f"Evaluated all {valid_count} values (100% valid observations)."
+
+        if valid_count == 0:
+            column_results[col] = IQROutlierColumnResult(
+                column=col,
+                q1=0.0,
+                q3=0.0,
+                iqr=0.0,
+                multiplier=multiplier,
+                lower_bound=0.0,
+                upper_bound=0.0,
+                lower_outliers_count=0,
+                upper_outliers_count=0,
+                total_outliers=0,
+                outlier_pct=0.0,
+                outlier_indices=[],
+                min_val=0.0,
+                max_val=0.0,
+                valid_count=0,
+                missing_count=total_rows,
+                total_rows=total_rows,
+                evaluation_note=f"No valid numeric values out of {total_rows} rows.",
+            )
             continue
 
         q1 = float(s.quantile(0.25))
@@ -67,15 +102,14 @@ def detect_iqr_anomalies(
         lower_bound = float(q1 - (multiplier * iqr))
         upper_bound = float(q3 + (multiplier * iqr))
 
-        col_series = df[col]
-        lower_mask = (col_series < lower_bound) & col_series.notna()
-        upper_mask = (col_series > upper_bound) & col_series.notna()
+        lower_mask = (num_series < lower_bound) & finite_mask
+        upper_mask = (num_series > upper_bound) & finite_mask
         total_mask = lower_mask | upper_mask
 
         lower_count = int(lower_mask.sum())
         upper_count = int(upper_mask.sum())
         total_outliers = lower_count + upper_count
-        outlier_pct = round((total_outliers / max(1, len(s))) * 100, 2)
+        outlier_pct = round((total_outliers / max(1, valid_count)) * 100, 2)
 
         outlier_idx = df.index[total_mask].tolist()
         all_outlier_indices_set.update(outlier_idx)
@@ -95,6 +129,10 @@ def detect_iqr_anomalies(
             outlier_indices=outlier_idx,
             min_val=round(float(s.min()), 4),
             max_val=round(float(s.max()), 4),
+            valid_count=valid_count,
+            missing_count=missing_count,
+            total_rows=total_rows,
+            evaluation_note=eval_note,
         )
 
     all_outlier_indices = sorted(list(all_outlier_indices_set))

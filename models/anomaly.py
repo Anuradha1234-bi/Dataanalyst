@@ -27,6 +27,10 @@ class IQROutlierColumnResult:
     outlier_indices: List[Any] = field(default_factory=list)
     min_val: float = 0.0
     max_val: float = 0.0
+    valid_count: int = 0
+    missing_count: int = 0
+    total_rows: int = 0
+    evaluation_note: Optional[str] = None
 
 
 @dataclass
@@ -41,6 +45,7 @@ class IQRAnalysisResult:
     outlier_rate: float
     all_outlier_indices: List[Any]
     multiplier: float
+    duplicate_columns: Dict[str, List[str]] = field(default_factory=dict)
     timestamp: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
 
@@ -58,6 +63,7 @@ class IsolationForestResult:
     raw_decision_scores: List[float]  # raw decision function values
     anomaly_labels: List[str]  # "Normal" or "Anomaly"
     anomaly_indices: List[Any]  # row indices of detected anomalies
+    anomaly_positions: List[int] = field(default_factory=list)  # 0-based integer positions in evaluated matrix
     preprocessing_notes: List[str] = field(default_factory=list)
     excluded_columns: List[str] = field(default_factory=list)
     timestamp: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))

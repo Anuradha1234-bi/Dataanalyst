@@ -47,7 +47,7 @@ def recommend_query_visualization(
         or not isinstance(data, pd.DataFrame)
         or data.empty
         or (len(data) < 2 and intent not in (QueryIntent.TOP_N.value, QueryIntent.BOTTOM_N.value, QueryIntent.GROUP_BY.value))
-        or intent in (QueryIntent.COUNT.value, QueryIntent.DUPLICATES.value, QueryIntent.DATA_TYPES.value)
+        or intent in (QueryIntent.COUNT.value, QueryIntent.DUPLICATES.value, QueryIntent.DATA_TYPES.value, QueryIntent.DATA_QUALITY_REPORT.value, QueryIntent.SHOW_DATA.value)
     ):
         return {
             "recommended": False,
@@ -116,8 +116,38 @@ def recommend_query_visualization(
             "reason": "Temporal trend best represented by chronological line trajectory.",
         }
 
-    # 3. TOP_N / BOTTOM_N / GROUP_BY -> Bar Chart
-    if intent in (QueryIntent.TOP_N.value, QueryIntent.BOTTOM_N.value, QueryIntent.GROUP_BY.value, QueryIntent.COMPARE_GROUPS.value):
+    # 3. DONUT / PIE CHARTS (Proportions, Percentage Shares, Categories <= 8)
+    is_donut_pie = (
+        intent == QueryIntent.PERCENTAGE_CONTRIBUTION.value
+        or any(w in question.lower() for w in ["donut", "pie", "proportion", "share of", "breakdown in percentage"])
+        or (intent == QueryIntent.FREQUENCY.value and len(data) <= 8)
+    )
+    if is_donut_pie and len(data) <= 8:
+        cat_cols = [c for c in cols if not pd.api.types.is_numeric_dtype(data[c])]
+        num_cols = [c for c in cols if pd.api.types.is_numeric_dtype(data[c])]
+        x_col = cat_cols[0] if cat_cols else cols[0]
+        y_col = num_cols[0] if num_cols else (cols[1] if len(cols) > 1 else cols[0])
+        chart_kind = "pie" if "pie" in question.lower() else "donut"
+        return {
+            "recommended": True,
+            "chart_type": chart_kind,
+            "x": x_col,
+            "y": y_col,
+            "figure": None,
+            "reason": f"Category proportions and percentage shares best represented by an interactive {chart_kind} chart.",
+        }
+
+    # 4. TOP_N / BOTTOM_N / GROUP_BY / RANKINGS / COMPARISONS -> Bar Chart
+    if intent in (
+        QueryIntent.TOP_N.value,
+        QueryIntent.BOTTOM_N.value,
+        QueryIntent.GROUP_BY.value,
+        QueryIntent.COMPARE_GROUPS.value,
+        QueryIntent.PERCENTAGE_CONTRIBUTION.value,
+        QueryIntent.FREQUENCY.value,
+        QueryIntent.PROFITABILITY.value,
+        QueryIntent.COMPLEX_SUBQUERY.value,
+    ):
         # Identify categorical x and numeric y
         cat_cols = [c for c in cols if not pd.api.types.is_numeric_dtype(data[c])]
         num_cols = [c for c in cols if pd.api.types.is_numeric_dtype(data[c])]
@@ -150,35 +180,64 @@ def recommend_query_visualization(
             "reason": "Categorical ranking and group comparison best visualized with a vertical bar chart.",
         }
 
-    # 4. CORRELATION -> Horizontal Bar or Heatmap
-    if intent == QueryIntent.CORRELATION.value and "Feature A" in cols and "Correlation (r)" in cols:
-        plot_df = data.copy()
-        plot_df["Pair"] = plot_df["Feature A"] + " ↔ " + plot_df["Feature B"]
-        fig = px.bar(
-            plot_df.head(10),
-            x="Correlation (r)",
-            y="Pair",
-            orientation="h",
-            title="Strongest Feature Correlations (Pearson r)",
-            template="plotly_white",
-            color="Correlation (r)",
-            color_continuous_scale="RdBu",
-            range_color=[-1, 1],
-        )
-        fig.update_layout(
-            margin=dict(l=20, r=20, t=40, b=20),
-            plot_bgcolor=LIGHT_BG,
-            paper_bgcolor=LIGHT_BG,
-            font=dict(color=TEXT_COLOR),
-        )
+    # 5. CORRELATION -> Heatmap or Horizontal Bar
+    if intent == QueryIntent.CORRELATION.value:
+        ev = query_result.get("evidence", {})
+        if ev.get("matrix") and ev.get("categories"):
+            return {
+                "recommended": True,
+                "chart_type": "heatmap",
+                "x": "Feature",
+                "y": "Feature",
+                "matrix": ev.get("matrix"),
+                "categories": ev.get("categories"),
+                "figure": None,
+                "reason": "Inter-feature linear associations and covariance matrix best visualized with a correlation heatmap.",
+            }
+        elif "Feature A" in cols and "Correlation (r)" in cols:
+            plot_df = data.copy()
+            plot_df["Pair"] = plot_df["Feature A"] + " ↔ " + plot_df["Feature B"]
+            fig = px.bar(
+                plot_df.head(10),
+                x="Correlation (r)",
+                y="Pair",
+                orientation="h",
+                title="Strongest Feature Correlations (Pearson r)",
+                template="plotly_white",
+                color="Correlation (r)",
+                color_continuous_scale="RdBu",
+                range_color=[-1, 1],
+            )
+            fig.update_layout(
+                margin=dict(l=20, r=20, t=40, b=20),
+                plot_bgcolor=LIGHT_BG,
+                paper_bgcolor=LIGHT_BG,
+                font=dict(color=TEXT_COLOR),
+            )
+            return {
+                "recommended": True,
+                "chart_type": "horizontal_bar",
+                "x": "Correlation (r)",
+                "y": "Pair",
+                "figure": fig,
+                "reason": "Feature association strengths visualized using directional correlation bars.",
+            }
+
+    # 6. HISTOGRAM / NUMERICAL DISTRIBUTION
+    if (
+        any(w in question.lower() for w in ["histogram", "distribution of", "show distribution"])
+        or intent == QueryIntent.DESCRIPTIVE_STATISTICS.value
+    ) and query_plan.get("column"):
+        col_m = query_plan.get("column")
         return {
             "recommended": True,
-            "chart_type": "horizontal_bar",
-            "x": "Correlation (r)",
-            "y": "Pair",
-            "figure": fig,
-            "reason": "Feature association strengths visualized using directional correlation bars.",
+            "chart_type": "histogram",
+            "x": col_m,
+            "y": "Count",
+            "figure": None,
+            "reason": f"Frequency distribution and bin spread of numerical variable '{col_m}' visualized with a histogram.",
         }
+
 
     # 5. MISSING VALUES -> Bar Chart of Missing Values per Column
     if intent == QueryIntent.MISSING_VALUES.value and "Missing Values" in cols:

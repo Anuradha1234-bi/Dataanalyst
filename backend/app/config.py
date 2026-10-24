@@ -5,13 +5,15 @@ from pathlib import Path
 from typing import List
 from dotenv import load_dotenv
 
-# Root of the project (ai-data-analyst-agent)
+# Root and directory paths
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = BACKEND_DIR.parent
-ENV_PATH = PROJECT_ROOT / ".env"
 
-if ENV_PATH.exists():
-    load_dotenv(dotenv_path=ENV_PATH)
+# Load environment variables: check PROJECT_ROOT / .env, then BACKEND_DIR / .env, then cwd
+if (PROJECT_ROOT / ".env").exists():
+    load_dotenv(dotenv_path=PROJECT_ROOT / ".env")
+elif (BACKEND_DIR / ".env").exists():
+    load_dotenv(dotenv_path=BACKEND_DIR / ".env")
 else:
     load_dotenv()
 
@@ -20,6 +22,7 @@ class Settings:
     """Application and environment configuration."""
 
     PROJECT_NAME: str = os.getenv("APP_NAME", "AI Data Analyst Agent")
+    APP_NAME: str = PROJECT_NAME
     APP_ENV: str = os.getenv("APP_ENV", "development")
     PROJECT_VERSION: str = "1.0.0"
     API_V1_PREFIX: str = "/api"
@@ -40,16 +43,22 @@ class Settings:
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
 
-    # Password Reset & Email Configuration
+    # Password Reset & Email Configuration (Gmail SMTP)
     PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("PASSWORD_RESET_TOKEN_EXPIRE_MINUTES", "20"))
     FRONTEND_URL: str = os.getenv("FRONTEND_URL", "http://localhost:5174").rstrip("/")
-    SMTP_HOST: str = os.getenv("SMTP_HOST", "")
+    SMTP_HOST: str = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
     SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
-    SMTP_USER: str = os.getenv("SMTP_USER", "")
-    SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "")
-    SMTP_FROM_EMAIL: str = os.getenv("SMTP_FROM_EMAIL", "noreply@datanalyst.ai")
+    SMTP_USERNAME: str = (os.getenv("SMTP_USERNAME") or os.getenv("SMTP_USER") or "").strip()
+    SMTP_USER: str = SMTP_USERNAME
+    _raw_smtp_pwd: str = os.getenv("SMTP_PASSWORD", "").strip()
+    SMTP_PASSWORD: str = _raw_smtp_pwd.replace(" ", "") if (len(_raw_smtp_pwd.replace(" ", "")) == 16 and _raw_smtp_pwd.replace(" ", "").isalnum()) else _raw_smtp_pwd
+    SMTP_FROM_EMAIL: str = (os.getenv("SMTP_FROM_EMAIL") or os.getenv("SMTP_USERNAME") or os.getenv("SMTP_USER") or "dataanalystagent@gmail.com").strip()
     SMTP_FROM_NAME: str = os.getenv("SMTP_FROM_NAME", "AI Data Analyst Agent")
     SMTP_TLS: bool = os.getenv("SMTP_TLS", "true").lower() in ("true", "1", "yes")
+
+    # Support Contact Information
+    SUPPORT_EMAIL: str = os.getenv("SUPPORT_EMAIL", "dataanalystagent@gmail.com").strip()
+    SUPPORT_PHONE: str = os.getenv("SUPPORT_PHONE", "9021964018").strip()
 
     # CORS
     CORS_ORIGINS: List[str] = [
@@ -64,7 +73,7 @@ class Settings:
         "http://localhost:8000",
         "http://127.0.0.1:8000",
         "http://localhost:8002",
-         "http://127.0.0.1:8002",
+        "http://127.0.0.1:8002",
     ]
 
     # Storage Paths & Upload Limits
@@ -73,6 +82,16 @@ class Settings:
     MODELS_DIR: Path = PROJECT_ROOT / os.getenv("MODELS_DIR", "models_storage")
     MAX_UPLOAD_SIZE_MB: int = int(os.getenv("MAX_UPLOAD_SIZE_MB", "50"))
     ALLOWED_EXTENSIONS: List[str] = [".csv", ".xlsx", ".xls"]
+
+    @property
+    def max_upload_size_bytes(self) -> int:
+        """Maximum file upload size in bytes."""
+        return self.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+
+    @property
+    def dataset_storage_path(self) -> Path:
+        """Directory path where uploaded dataset files are stored."""
+        return self.UPLOAD_DIR
 
     @classmethod
     def ensure_directories(cls) -> None:
@@ -84,4 +103,3 @@ class Settings:
 
 settings = Settings()
 settings.ensure_directories()
-

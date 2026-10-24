@@ -163,6 +163,7 @@ class ProfilerAgent:
             missing_cols_list=missing_cols_list,
             high_cardinality_list=high_cardinality_list,
             constant_cols_list=constant_cols_list,
+            df=df,
         )
 
         return ProfileResult(
@@ -204,18 +205,24 @@ class ProfilerAgent:
         if pd.api.types.is_numeric_dtype(series):
             return "NUMERIC", series
 
-        # 4. Check String Date representation (e.g. DD-MM-YYYY, YYYY-MM-DD)
+        # 4. Check String Date representation (e.g. DD-MM-YYYY, YYYY-MM-DD, ISO formats)
         sample = non_null.astype(str).str.strip().head(50)
         has_date_delimiters = sample.str.contains(r"[\/\-\.]", regex=True).mean() > 0.7
-        if has_date_delimiters:
+        is_date_named = any(k in str(series.name).lower() for k in ("date", "time", "timestamp")) if series.name else False
+        if has_date_delimiters or is_date_named:
             try:
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore", category=UserWarning)
-                    # Attempt conversion with flexible dayfirst=True
-                    converted_dates = pd.to_datetime(sample, dayfirst=True, errors="coerce")
+                    # Attempt standard conversion first (handles ISO YYYY-MM-DD, standard dates)
+                    converted_dates = pd.to_datetime(sample, errors="coerce")
+                    if converted_dates.notna().mean() < 0.75:
+                        # Fallback to dayfirst=True for ambiguous DMY representations
+                        converted_dates = pd.to_datetime(sample, dayfirst=True, errors="coerce")
                     valid_ratio = converted_dates.notna().mean()
                     if valid_ratio >= 0.75:
-                        full_converted = pd.to_datetime(series, dayfirst=True, errors="coerce")
+                        full_converted = pd.to_datetime(series, errors="coerce")
+                        if full_converted.notna().mean() < 0.75:
+                            full_converted = pd.to_datetime(series, dayfirst=True, errors="coerce")
                         return "DATETIME", full_converted
             except Exception:
                 pass
@@ -240,7 +247,7 @@ class ProfilerAgent:
         return "CATEGORICAL", None
 
     @classmethod
-    def _compute_numeric_stats(cls, series: pd.Series) -> Dict[str, float]:
+    def _compute_numeric_stats(cls, series: pd.Series) -> Dict[str, Any]:
         """Compute statistical summary for numeric series."""
         clean = pd.to_numeric(series, errors="coerce").dropna()
         if clean.empty:
@@ -254,11 +261,24 @@ class ProfilerAgent:
                 "q1": 0.0,
                 "q3": 0.0,
                 "iqr": 0.0,
+                "histogram": [],
             }
 
         q1 = round(float(clean.quantile(0.25)), 2)
         q3 = round(float(clean.quantile(0.75)), 2)
         iqr = round(float(q3 - q1), 2)
+
+        # Compute 4 to 8 histogram bins for graphical distribution
+        hist_bins = []
+        if len(clean) > 0:
+            num_bins = min(8, max(3, int(clean.nunique())))
+            counts, bin_edges = np.histogram(clean, bins=num_bins)
+            for i in range(len(counts)):
+                hist_bins.append({
+                    "bin_start": round(float(bin_edges[i]), 2),
+                    "bin_end": round(float(bin_edges[i+1]), 2),
+                    "count": int(counts[i]),
+                })
 
         return {
             "count": int(clean.count()),
@@ -270,6 +290,7 @@ class ProfilerAgent:
             "q1": q1,
             "q3": q3,
             "iqr": iqr,
+            "histogram": hist_bins,
         }
 
     @classmethod
@@ -344,39 +365,52 @@ class ProfilerAgent:
         missing_cols_list: List[Dict[str, Any]],
         high_cardinality_list: List[Dict[str, Any]],
         constant_cols_list: List[str],
+        df: Optional[pd.DataFrame] = None,
     ) -> QualityReport:
-        """Calculate dynamic Dataset Health Score (0-100) with diagnostic feedback."""
-        score = 100.0
+        """Calculate authoritative Dataset Health / Quality Score (0-100) consistent across all pages."""
+        if df is not None:
+            try:
+                from app.services.quality_service import DataQualityService
+            except ImportError:
+                try:
+                    from backend.app.services.quality_service import DataQualityService
+                except ImportError:
+                    DataQualityService = None
 
-        # Missing cells penalty (max 35 pts)
-        if total_cells > 0:
-            missing_ratio = total_missing / total_cells
-            score -= min(35.0, missing_ratio * 120.0)
+            if DataQualityService is not None:
+                q_score, q_status, q_msg, _ = DataQualityService.calculate_quality_score(df)
+                dup_pct = round((duplicate_rows / total_rows * 100.0) if total_rows > 0 else 0.0, 2)
+                return QualityReport(
+                    health_score=int(round(q_score)),
+                    health_status=q_status,
+                    health_explanation=q_msg,
+                    missing_columns=missing_cols_list,
+                    high_cardinality_columns=high_cardinality_list,
+                    constant_columns=constant_cols_list,
+                    duplicate_rows=duplicate_rows,
+                    duplicate_percentage=dup_pct,
+                )
 
-        # Duplicate rows penalty (max 25 pts)
-        if total_rows > 0:
-            dup_ratio = duplicate_rows / total_rows
-            score -= min(25.0, dup_ratio * 100.0)
+        # Fallback using identical authoritative scoring formula
+        missing_pct = (total_missing / total_cells * 100.0) if total_cells > 0 else 0.0
+        dup_pct = (duplicate_rows / total_rows * 100.0) if total_rows > 0 else 0.0
 
-        # Constant columns penalty (5 pts each, max 15 pts)
-        score -= min(15.0, len(constant_cols_list) * 5.0)
+        penalty = 0.0
+        penalty += min(35.0, missing_pct * 1.5)
+        penalty += min(20.0, dup_pct * 1.0)
+        penalty += len(constant_cols_list) * 8.0
 
-        final_score = int(round(max(0.0, min(100.0, score))))
+        final_score = int(round(max(0.0, min(100.0, 100.0 - penalty))))
 
-        if final_score >= 90:
-            status = "Excellent"
-            explanation = "Excellent dataset health with minimal or no structural data issues."
-        elif final_score >= 75:
-            status = "Good"
-            explanation = "Good dataset health with minor missing or duplicate values."
-        elif final_score >= 50:
-            status = "Moderate"
-            explanation = "Moderate dataset health. Noticeable missing records or duplicates present."
-        else:
+        if final_score < 60 or missing_pct >= 25.0:
+            status = "Poor"
+            explanation = f"Dataset exhibits significant quality degradation (Score: {final_score}/100)."
+        elif final_score < 85 or len(constant_cols_list) > 0:
             status = "Needs Attention"
-            explanation = "Significant missing values, duplicate records, or constant columns detected."
-
-        duplicate_pct = round((duplicate_rows / total_rows * 100.0) if total_rows > 0 else 0.0, 2)
+            explanation = f"Dataset is mostly usable (Score: {final_score}/100), but contains hygiene issues."
+        else:
+            status = "Good"
+            explanation = f"Dataset is clean and well-structured (Score: {final_score}/100) with 0 detected hygiene issues."
 
         return QualityReport(
             health_score=final_score,
@@ -386,7 +420,7 @@ class ProfilerAgent:
             high_cardinality_columns=high_cardinality_list,
             constant_columns=constant_cols_list,
             duplicate_rows=duplicate_rows,
-            duplicate_percentage=duplicate_pct,
+            duplicate_percentage=round(dup_pct, 2),
         )
 
 

@@ -85,3 +85,27 @@ class Dataset(Base):
             self.column_names_json = None
         else:
             self.column_names_json = json.dumps(val)
+
+    @property
+    def preview_rows(self):
+        return getattr(self, "_preview_rows", None)
+
+    @preview_rows.setter
+    def preview_rows(self, val):
+        self._preview_rows = val
+
+    @property
+    def total_missing_cells(self):
+        return getattr(self, "_total_missing_cells", None)
+
+    @total_missing_cells.setter
+    def total_missing_cells(self, val):
+        self._total_missing_cells = val
+
+    @property
+    def missing_columns(self):
+        return getattr(self, "_missing_columns", None)
+
+    @missing_columns.setter
+    def missing_columns(self, val):
+        self._missing_columns = val

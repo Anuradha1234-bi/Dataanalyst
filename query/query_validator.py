@@ -55,6 +55,15 @@ def validate_query_plan(
         errors.append(f"Unsupported query intent '{intent}'.")
     elif intent == QueryIntent.UNKNOWN.value:
         errors.append(query_plan.get("metadata", {}).get("error") or "Operation rejected: Unsupported or disallowed query.")
+    elif intent in (QueryIntent.OUT_OF_SCOPE.value, QueryIntent.UNSUPPORTED_OPERATION.value, QueryIntent.DATA_QUALITY_REPORT.value):
+        # Valid user-classified intents that pass cleanly to execution / answer generation
+        return {
+            "valid": True,
+            "errors": [],
+            "warnings": [],
+            "requires_clarification": False,
+            "clarification_question": None,
+        }
 
     # 3. Check Datasets availability
     if not datasets:
@@ -106,7 +115,9 @@ def validate_query_plan(
         missing_formatted = ", ".join(f"'{c}'" for c in missing_cols)
         available_formatted = ", ".join(f"'{c}'" for c in df_cols)
         errors.append(
-            f"Requested column(s) {missing_formatted} do not exist in dataset '{target_ds_name}'. Available columns: {available_formatted}."
+            f"Requested column(s) {missing_formatted} do not exist in dataset '{target_ds_name}'. "
+            f"I cannot calculate {intent.lower()} because this dataset does not contain {missing_formatted} or sufficient information to derive it. "
+            f"Available columns are: {available_formatted}."
         )
 
     col = query_plan.get("column")
@@ -122,18 +133,39 @@ def validate_query_plan(
                     errors.append(f"Unsupported aggregation '{agg}'. Allowed: {list(ALLOWED_AGGREGATIONS)}")
                 elif agg_clean in NUMERIC_ONLY_AGGREGATIONS:
                     if not pd.api.types.is_numeric_dtype(df[col]):
-                        errors.append(f"Aggregation '{agg}' requires a numeric column, but '{col}' has datatype '{df[col].dtype}'.")
+                        errors.append(
+                            f"Aggregation '{agg}' requires a numeric column, but '{col}' is a categorical/text column with datatype '{df[col].dtype}'. "
+                            f"Numeric operations like average, sum, mean, or standard deviation cannot be computed on text categories."
+                        )
     elif intent in (
         QueryIntent.AVERAGE.value,
         QueryIntent.SUM.value,
         QueryIntent.MEDIAN.value,
         QueryIntent.MINIMUM.value,
         QueryIntent.MAXIMUM.value,
+        QueryIntent.STANDARD_DEVIATION.value,
     ):
-        available_formatted = ", ".join(f"'{c}'" for c in df_cols)
-        errors.append(
-            f"No valid numeric column specified or found for {intent.lower()} aggregation in dataset '{target_ds_name}'. Available columns: {available_formatted}."
-        )
+        if not missing_cols:
+            has_numeric = any(pd.api.types.is_numeric_dtype(df[c]) for c in df_cols)
+            if not has_numeric:
+                available_formatted = ", ".join(f"'{c}'" for c in df_cols)
+                op_disp = "standard deviation" if intent == QueryIntent.STANDARD_DEVIATION.value else intent.lower()
+                errors.append(
+                    f"No numeric columns exist in dataset '{target_ds_name}' to calculate {op_disp}. Available columns: {available_formatted}."
+                )
+    elif intent == QueryIntent.COMPLEX_SUBQUERY.value:
+        if not missing_cols:
+            available_formatted = ", ".join(f"'{c}'" for c in df_cols)
+            if not col or col not in df_cols:
+                errors.append(
+                    f"No valid numeric metric column found for subquery analysis in dataset '{target_ds_name}'. Available columns: {available_formatted}."
+                )
+            elif not pd.api.types.is_numeric_dtype(df[col]):
+                errors.append(
+                    f"Subquery metric column '{col}' must be numeric, but has datatype '{df[col].dtype}'."
+                )
+            if not query_plan.get("group_by"):
+                errors.append("Subquery analysis requires an entity or category column to evaluate.")
 
     sec_col = query_plan.get("secondary_column")
     if sec_col is not None and sec_col not in df_cols:

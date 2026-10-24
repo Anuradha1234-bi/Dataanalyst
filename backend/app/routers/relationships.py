@@ -12,6 +12,8 @@ from app.schemas.relationship import (
     RelationshipDetectRequest,
     RelationshipDetectResponse,
     RelationshipStatusUpdateRequest,
+    DuplicateDetectResponse,
+    DuplicateIgnoreRequest,
     JoinPreviewRequest,
     JoinPreviewResponse,
     JoinApplyRequest,
@@ -65,6 +67,43 @@ def get_all_relationships(
     """Discover relationships among all uploaded datasets for current user."""
     datasets = db.query(Dataset).filter(Dataset.user_id == current_user.id).all()
     return RelationshipService.detect_relationships(datasets)
+
+
+@router.post("/duplicates/detect", response_model=DuplicateDetectResponse)
+def detect_duplicates(
+    request: RelationshipDetectRequest = RelationshipDetectRequest(),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Detect duplicate or substantially similar datasets among current user's datasets."""
+    query = db.query(Dataset).filter(Dataset.user_id == current_user.id)
+    if request.dataset_ids:
+        query = query.filter(Dataset.id.in_(request.dataset_ids))
+    datasets = query.all()
+    return RelationshipService.detect_duplicates(datasets)
+
+
+@router.get("/duplicates", response_model=DuplicateDetectResponse)
+def get_all_duplicates(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Get duplicate dataset pairs among all uploaded datasets for current user."""
+    datasets = db.query(Dataset).filter(Dataset.user_id == current_user.id).all()
+    return RelationshipService.detect_duplicates(datasets)
+
+
+@router.post("/duplicates/ignore", status_code=status.HTTP_200_OK)
+def ignore_duplicate(
+    request: DuplicateIgnoreRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Mark a detected duplicate pair as ignored without modifying or deleting any underlying dataset."""
+    return {
+        "pair_id": request.pair_id,
+        "status": "IGNORED",
+        "message": "Duplicate candidate ignored. Underlying datasets were not modified or deleted.",
+    }
 
 
 @router.post("/status", status_code=status.HTTP_200_OK)

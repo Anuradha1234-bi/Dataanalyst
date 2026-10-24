@@ -72,13 +72,55 @@ class RelationshipItem(BaseModel):
     is_candidate: Optional[bool] = Field(default=False, description="Whether this is a plausible candidate relationship")
 
 
+class DuplicateDatasetItem(BaseModel):
+    """Detailed comparison and duplicate classification between two datasets."""
+    id: str = Field(..., description="Unique identifier for this duplicate pair comparison")
+    dataset1_id: int
+    dataset1_name: str
+    dataset1_rows: int
+    dataset1_columns: int
+    dataset2_id: int
+    dataset2_name: str
+    dataset2_rows: int
+    dataset2_columns: int
+    status: str = Field(..., description="'Exact Duplicate', 'Potential Duplicate', or 'Partial Overlap'")
+    status_level: str = Field(..., description="'EXACT_DUPLICATE', 'POTENTIAL_DUPLICATE', or 'PARTIAL_OVERLAP'")
+    overlap_percentage: float = Field(..., description="Calculated overlap percentage")
+    matching_records: int
+    unique_to_dataset1: int
+    unique_to_dataset2: int
+    shared_columns: List[str] = Field(default_factory=list)
+    unmatched_columns_dataset1: List[str] = Field(default_factory=list)
+    unmatched_columns_dataset2: List[str] = Field(default_factory=list)
+    calculation_method: str = Field(..., description="Mathematical definition of the overlap calculation")
+    comparison_method: str = Field(..., description="Explanation of comparison technique")
+    differences: List[str] = Field(default_factory=list)
+    sample_differences_dataset1: List[Dict[str, Any]] = Field(default_factory=list)
+    sample_differences_dataset2: List[Dict[str, Any]] = Field(default_factory=list)
+    user_status: str = Field(default="PENDING", description="'PENDING' or 'IGNORED'")
+
+
 class RelationshipDetectResponse(BaseModel):
-    """Response returned after discovering relationships."""
+    """Response returned after discovering relationships and duplicate datasets."""
     total_detected: int
     analyzed_datasets_count: int
     relationships: List[RelationshipItem]
+    duplicate_datasets: List[DuplicateDatasetItem] = Field(default_factory=list, description="Detected duplicate or overlapping dataset pairs")
     scan_summary: Optional[Dict[str, Any]] = Field(default=None, description="Detailed audit of datasets and columns evaluated during scan")
     message: Optional[str] = Field(default=None, description="Summary or explanation of detection result")
+
+
+class DuplicateDetectResponse(BaseModel):
+    """Dedicated response for smart duplicate dataset detection."""
+    total_pairs_evaluated: int
+    duplicates_detected_count: int
+    duplicate_datasets: List[DuplicateDatasetItem] = Field(default_factory=list)
+    summary: Dict[str, Any] = Field(default_factory=dict)
+
+
+class DuplicateIgnoreRequest(BaseModel):
+    """Request to ignore a detected duplicate dataset pair."""
+    pair_id: str
 
 
 class RelationshipStatusUpdateRequest(BaseModel):

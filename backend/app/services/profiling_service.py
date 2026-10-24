@@ -1,4 +1,4 @@
-﻿"""Profiling Service - Orchestrates dataset loading, statistical distribution profiling, and quality diagnostics."""
+"""Profiling Service - Orchestrates dataset loading, statistical distribution profiling, and quality diagnostics."""
 
 import os
 from pathlib import Path
@@ -26,10 +26,15 @@ class ProfilingService:
     """Service encapsulating data profiling calculations and quality score computation."""
 
     @classmethod
-    def get_dataset_profile(cls, dataset: Dataset) -> DatasetProfileResponse:
+    def get_dataset_profile(cls, dataset: Dataset, active: bool = True) -> DatasetProfileResponse:
         """Compute full statistical and hygiene profile for a dataset database record."""
-        # 1. Verify physical file exists on disk
-        file_path = Path(dataset.file_path)
+        # 1. Verify physical file exists on disk (resolving active cleaned file if available)
+        if active and dataset.has_cleaned and dataset.cleaned_file_path:
+            p = Path(dataset.cleaned_file_path)
+            file_path = p if (p.exists() and p.is_file()) else Path(dataset.file_path)
+        else:
+            file_path = Path(dataset.file_path)
+
         if not file_path.exists() or not file_path.is_file():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -88,6 +93,7 @@ class ProfilingService:
                     q1=float(cp.numeric_stats.get("q1", 0.0)),
                     q3=float(cp.numeric_stats.get("q3", 0.0)),
                     iqr=float(cp.numeric_stats.get("iqr", 0.0)),
+                    histogram=cp.numeric_stats.get("histogram"),
                 )
 
             cat_stats = None

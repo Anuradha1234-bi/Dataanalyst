@@ -6,7 +6,7 @@ import json
 import uuid
 from pathlib import Path
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, status
 from fastapi.responses import FileResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -20,6 +20,7 @@ from app.schemas.dataset import (
     DatasetResponse,
     DatasetUploadResponse,
     DatasetFailedUpload,
+    DatasetPreviewResponse,
 )
 from app.auth.dependencies import get_current_user
 from utils.file_loader import FileLoader
@@ -182,6 +183,29 @@ async def upload_datasets(
             db.add(dataset)
             db.commit()
             db.refresh(dataset)
+
+            # Compute preview and missing values metadata from load_result.df
+            preview_rows = []
+            total_missing = 0
+            missing_columns = []
+            if load_result.df is not None:
+                preview_rows = DataCleaningService._sanitize_for_json(load_result.df.head(5).to_dict(orient="records"))
+                missing_series = load_result.df.isna().sum()
+                total_missing = int(missing_series.sum())
+                missing_columns = [
+                    {
+                        "column": str(c),
+                        "missing_count": int(cnt),
+                        "missing_percentage": round((float(cnt) / max(len(load_result.df), 1)) * 100, 2),
+                    }
+                    for c, cnt in missing_series.items()
+                    if cnt > 0
+                ]
+
+            dataset.preview_rows = preview_rows
+            dataset.total_missing_cells = total_missing
+            dataset.missing_columns = missing_columns
+
             uploaded.append(dataset)
             total_user_bytes += bytes_written
         except Exception as e:
@@ -245,6 +269,62 @@ def get_dataset_by_id(
             detail="Dataset not found.",
         )
     return dataset
+
+
+@router.get("/{dataset_id}/preview", response_model=DatasetPreviewResponse)
+def get_dataset_preview(
+    dataset_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Retrieve sample 5-row preview and missing values metadata for an uploaded dataset."""
+    dataset = (
+        db.query(Dataset)
+        .filter(Dataset.id == dataset_id, Dataset.user_id == current_user.id)
+        .first()
+    )
+    if not dataset:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Dataset not found.",
+        )
+    file_path = Path(dataset.file_path)
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Dataset file not found on disk.",
+        )
+    load_result = FileLoader.load_file(file_path, dataset.filename, dataset.file_size_bytes or 0)
+    if not load_result.success or load_result.df is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=load_result.error_message or "Unable to read dataset content.",
+        )
+    df = load_result.df
+    preview_rows = DataCleaningService._sanitize_for_json(df.head(5).to_dict(orient="records"))
+    missing_series = df.isna().sum()
+    total_missing = int(missing_series.sum())
+    missing_cols = [
+        {
+            "column": str(c),
+            "missing_count": int(cnt),
+            "missing_percentage": round((float(cnt) / max(len(df), 1)) * 100, 2),
+        }
+        for c, cnt in missing_series.items()
+        if cnt > 0
+    ]
+    cols = json.loads(dataset.column_names_json) if dataset.column_names_json else [str(c) for c in df.columns]
+    return DatasetPreviewResponse(
+        id=dataset.id,
+        filename=dataset.filename,
+        file_type=(dataset.file_type or "CSV").upper(),
+        rows=dataset.rows,
+        columns=dataset.columns,
+        column_names=cols,
+        preview_rows=preview_rows,
+        total_missing_cells=total_missing,
+        missing_columns=missing_cols,
+    )
 
 
 @router.get("/{dataset_id}/download")
@@ -373,6 +453,7 @@ def profile_multiple_datasets(
 @router.get("/{dataset_id}/quality", response_model=DataQualityResponse)
 def get_dataset_quality(
     dataset_id: int,
+    version: str = Query("original", description="Dataset version: 'original' or 'cleaned'"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -387,7 +468,7 @@ def get_dataset_quality(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Dataset not found.",
         )
-    return DataQualityService.analyze_dataset_quality(dataset)
+    return DataQualityService.analyze_dataset_quality(dataset, version=version)
 
 
 

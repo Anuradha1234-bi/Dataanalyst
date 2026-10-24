@@ -31,10 +31,25 @@ class TimeSeriesService:
         if rolling_windows is None:
             rolling_windows = [7, 14, 30]
 
-        # 1. Parse dates and sort chronologically
+        # 1. Parse dates and target, handle duplicate timestamps, and sort chronologically
         df_work = df.copy()
         df_work["_parsed_date"] = pd.to_datetime(df_work[date_col], errors="coerce")
+        df_work[target_col] = pd.to_numeric(
+            df_work[target_col].astype(str).str.strip().str.replace(r"^[\$,₹,€,£]", "", regex=True).str.replace(r"%$", "", regex=True),
+            errors="coerce",
+        )
         df_work = df_work.dropna(subset=["_parsed_date", target_col])
+
+        if len(df_work) < 5:
+            raise ValueError(
+                f"Time-series forecasting requires a valid numeric target and parseable dates. "
+                f"Target '{target_col}' contains insufficient numeric data ({len(df_work)} observations, minimum 5 required)."
+            )
+
+        # Handle duplicate timestamps by taking chronological mean
+        if df_work["_parsed_date"].duplicated().any():
+            df_work = df_work.groupby("_parsed_date", as_index=False)[target_col].mean()
+
         df_work = df_work.sort_values(by="_parsed_date").reset_index(drop=True)
 
         n_rows = len(df_work)
@@ -45,31 +60,32 @@ class TimeSeriesService:
         feature_cols.append("trend_index")
 
         # 3. Calendar temporal features
-        df_work["day_of_week"] = df_work["_parsed_date"].dt.dayofweek
-        df_work["day_of_month"] = df_work["_parsed_date"].dt.day
-        df_work["month"] = df_work["_parsed_date"].dt.month
-        df_work["quarter"] = df_work["_parsed_date"].dt.quarter
+        df_work["day_of_week"] = df_work["_parsed_date"].dt.dayofweek.astype(float)
+        df_work["day_of_month"] = df_work["_parsed_date"].dt.day.astype(float)
+        df_work["month"] = df_work["_parsed_date"].dt.month.astype(float)
+        df_work["quarter"] = df_work["_parsed_date"].dt.quarter.astype(float)
         feature_cols.extend(["day_of_week", "day_of_month", "month", "quarter"])
 
         # 4. Lag Features (conditioned on available sequence length)
         for lag in lags:
             if n_rows > lag + 4:
                 col_name = f"{target_col}_lag_{lag}"
-                df_work[col_name] = df_work[target_col].shift(lag)
+                df_work[col_name] = df_work[target_col].shift(lag).astype(float)
                 feature_cols.append(col_name)
 
         # 5. Rolling Window Features (strictly shifted by 1 to prevent current-step leakage)
-        target_shifted = df_work[target_col].shift(1)
+        target_shifted = df_work[target_col].shift(1).astype(float)
         for window in rolling_windows:
             if n_rows > window + 4:
                 mean_col = f"{target_col}_roll_mean_{window}"
                 std_col = f"{target_col}_roll_std_{window}"
-                df_work[mean_col] = target_shifted.rolling(window, min_periods=max(2, window // 2)).mean()
-                df_work[std_col] = target_shifted.rolling(window, min_periods=max(2, window // 2)).std()
+                df_work[mean_col] = target_shifted.rolling(window, min_periods=max(2, window // 2)).mean().astype(float)
+                df_work[std_col] = target_shifted.rolling(window, min_periods=max(2, window // 2)).std().astype(float)
                 feature_cols.extend([mean_col, std_col])
 
         # Fill leading edge NaNs from shifts using backfill/median so rows aren't discarded
-        df_work[feature_cols] = df_work[feature_cols].bfill().fillna(df_work[target_col].median())
+        median_val = float(df_work[target_col].median()) if not df_work[target_col].empty else 0.0
+        df_work[feature_cols] = df_work[feature_cols].bfill().fillna(median_val).fillna(0.0)
 
         # Infer frequency
         inferred_freq = "daily"

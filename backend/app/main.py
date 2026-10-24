@@ -33,6 +33,8 @@ from app.routers import (
     analytics_router,
     settings_router,
     users_router,
+    support_router,
+    feedback_router,
 )
 
 
@@ -102,6 +104,8 @@ def create_application() -> FastAPI:
     app_instance.include_router(analytics_router, prefix=settings.API_V1_PREFIX)
     app_instance.include_router(settings_router, prefix=settings.API_V1_PREFIX)
     app_instance.include_router(users_router, prefix=settings.API_V1_PREFIX)
+    app_instance.include_router(support_router, prefix=settings.API_V1_PREFIX)
+    app_instance.include_router(feedback_router, prefix=settings.API_V1_PREFIX)
 
     return app_instance
 

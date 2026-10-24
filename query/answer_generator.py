@@ -48,6 +48,41 @@ def generate_query_answer(
             "confidence": "Low",
         }
 
+    # Handle OUT_OF_SCOPE inquiries directly
+    if intent == QueryIntent.OUT_OF_SCOPE.value:
+        return {
+            "answer": "This assistant is designed to analyze your selected dataset. Please ask a question related to the available data and columns.",
+            "key_points": [
+                "This assistant is specialized for dataset analysis.",
+                "Please ask a question related to your loaded dataset columns.",
+            ],
+            "evidence": ["Out-of-scope query: no dataset columns or analytical operations referenced."],
+            "limitations": ["General trivia, biology, geography, and non-dataset questions are out of scope."],
+            "confidence": "High",
+        }
+
+    # Handle UNSUPPORTED_OPERATION inquiries directly
+    if intent == QueryIntent.UNSUPPORTED_OPERATION.value:
+        raw_ev = evidence.get("raw_evidence", {}) or evidence
+        uop = raw_ev.get("unsupported_operation") or query_plan.get("metadata", {}).get("unsupported_operation", "requested analytical operation")
+        req_col = raw_ev.get("requested_column") or query_plan.get("column")
+        col_clause = f" on column `{req_col}`" if req_col else ""
+        return {
+            "answer": (
+                f"The requested analytical operation '{uop}' is not currently supported{col_clause}. "
+                "Supported analytical operations include count, sum, average (mean), median, minimum, maximum, "
+                "standard deviation, top/bottom rankings, grouping, percentage contribution, temporal trends, "
+                "correlation analysis, and data hygiene checks (missing values and duplicates)."
+            ),
+            "key_points": [
+                f"Operation '{uop}' is not supported.",
+                "Supported operations: count, sum, average, median, min, max, standard deviation, rankings, grouping, trends, correlations.",
+            ],
+            "evidence": [f"Unsupported analytical operation requested: '{uop}'{col_clause}"],
+            "limitations": [f"The '{uop}' statistical algorithm is not implemented in the current analytical engine."],
+            "confidence": "High",
+        }
+
     if row_count == 0 or data is None or (isinstance(data, pd.DataFrame) and data.empty):
         if intent in (QueryIntent.FORECAST.value, QueryIntent.PREDICTION.value, "forecast", "prediction") or str(intent).upper() in ("FORECAST", "PREDICTION"):
             raw_ev = evidence.get("raw_evidence", {}) or evidence
@@ -94,36 +129,57 @@ def generate_query_answer(
         if cnt is None and isinstance(data, pd.DataFrame) and not data.empty:
             cnt = int(data.iloc[0, 0])
         cnt_val = cnt if cnt is not None else row_count
-        answer_text = f"There are **{cnt_val:,}** records in `{dataset_name}`."
+        raw_ev = evidence.get("raw_evidence", {}) if isinstance(evidence.get("raw_evidence"), dict) else {}
+        feat_cnt = evidence.get("feature_count") or raw_ev.get("feature_count")
+        if feat_cnt:
+            answer_text = f"Dataset `{dataset_name}` contains **{cnt_val:,}** records and **{feat_cnt} features / columns**."
+            key_points.append(f"Total Records: {cnt_val:,}")
+            key_points.append(f"Total Features: {feat_cnt}")
+        else:
+            answer_text = f"There are **{cnt_val:,}** records in `{dataset_name}`."
+            key_points.append(f"Total Count: {cnt_val:,}")
         if evidence.get("filters_applied"):
             answer_text += " matching the specified criteria."
-        key_points.append(f"Total Count: {cnt_val:,}")
         evidence_items.append(f"Row count: {cnt_val:,}")
 
-    # 2. AGGREGATIONS (AVERAGE, MEDIAN, SUM, MINIMUM, MAXIMUM)
-    elif intent in (QueryIntent.AVERAGE.value, QueryIntent.MEDIAN.value, QueryIntent.SUM.value, QueryIntent.MINIMUM.value, QueryIntent.MAXIMUM.value):
+    # 2. AGGREGATIONS (AVERAGE, MEDIAN, SUM, MINIMUM, MAXIMUM, STANDARD_DEVIATION)
+    elif intent in (
+        QueryIntent.AVERAGE.value,
+        QueryIntent.MEDIAN.value,
+        QueryIntent.SUM.value,
+        QueryIntent.MINIMUM.value,
+        QueryIntent.MAXIMUM.value,
+        QueryIntent.STANDARD_DEVIATION.value,
+    ):
         col = query_plan.get("column")
         agg = query_plan.get("aggregation") or (intent.lower() if intent else "average")
         group_by = query_plan.get("group_by", [])
+        display_agg = "standard deviation" if (agg == "std" or intent == QueryIntent.STANDARD_DEVIATION.value) else agg
 
         if not col or str(col).lower() == "none":
-            missing_cols = query_plan.get("metadata", {}).get("missing_columns", [])
-            if missing_cols:
-                answer_text = f"Unable to compute {agg}: requested column(s) {', '.join(f'`{c}`' for c in missing_cols)} were not found in dataset `{dataset_name}`."
+            if isinstance(data, pd.DataFrame) and not data.empty and "Feature" in data.columns:
+                answer_text = f"Computed {display_agg} across **{len(data)} numerical features** in `{dataset_name}`."
+                for _, r in data.iterrows():
+                    key_points.append(f"{r['Feature']}: {r.iloc[1]}")
+                    evidence_items.append(f"{r['Feature']} {display_agg} = {r.iloc[1]}")
             else:
-                answer_text = f"Unable to compute {agg}: no valid numerical column was specified or found in dataset `{dataset_name}`."
-            limitations.append(f"Requested measure not found in schema of dataset '{dataset_name}'.")
-            confidence_label = "Low"
-            confidence_score = 0.20
+                missing_cols = query_plan.get("metadata", {}).get("missing_columns", [])
+                if missing_cols:
+                    answer_text = f"Unable to compute {display_agg}: requested column(s) {', '.join(f'`{c}`' for c in missing_cols)} were not found in dataset `{dataset_name}`."
+                else:
+                    answer_text = f"Unable to compute {display_agg}: no valid numerical column was specified or found in dataset `{dataset_name}`."
+                limitations.append(f"Requested measure not found in schema of dataset '{dataset_name}'.")
+                confidence_label = "Low"
+                confidence_score = 0.20
         elif group_by and isinstance(data, pd.DataFrame) and not data.empty:
             grp_col = group_by[0]
             top_row = data.iloc[0]
             top_entity = top_row[grp_col]
             metric_val = top_row.iloc[1]
-            answer_text = f"**{top_entity}** has the highest {agg} `{col}` at **{metric_val:,.2f}**." if isinstance(metric_val, (int, float)) else f"**{top_entity}** leads with {agg} `{col}` of **{metric_val}**."
+            answer_text = f"**{top_entity}** has the highest {display_agg} `{col}` at **{metric_val:,.2f}**." if isinstance(metric_val, (int, float)) else f"**{top_entity}** leads with {display_agg} `{col}` of **{metric_val}**."
             key_points.append(f"Top {grp_col}: {top_entity}")
-            key_points.append(f"Computed {agg}: {metric_val}")
-            evidence_items.append(f"{grp_col}='{top_entity}', {agg}_{col}={metric_val}")
+            key_points.append(f"Computed {display_agg}: {metric_val}")
+            evidence_items.append(f"{grp_col}='{top_entity}', {display_agg}_{col}={metric_val}")
         else:
             val = evidence.get("computed_values", {}).get("metric_value")
             if val is None and isinstance(data, pd.DataFrame) and not data.empty:
@@ -132,15 +188,51 @@ def generate_query_answer(
                 val = data
 
             if val is None:
-                answer_text = f"No valid numerical values were found in `{col}` to calculate {agg}."
+                answer_text = f"No valid numerical values were found in `{col}` to calculate {display_agg}."
                 limitations.append(f"Column '{col}' contains no valid numerical observations.")
                 confidence_label = "Low"
                 confidence_score = 0.20
             else:
                 formatted_val = f"{val:,.2f}" if isinstance(val, (int, float)) else str(val)
-                answer_text = f"The {agg} `{col}` is **{formatted_val}**."
-                key_points.append(f"{agg.title()} {col}: {formatted_val}")
-                evidence_items.append(f"Computed value: {formatted_val}")
+                raw_ev = evidence.get("raw_evidence", {}) if isinstance(evidence.get("raw_evidence"), dict) else {}
+                rec_info = evidence.get("record") or raw_ev.get("record")
+                rec_idx = evidence.get("record_index") or raw_ev.get("record_index")
+
+                if agg in ("std", "standard_deviation") or intent == QueryIntent.STANDARD_DEVIATION.value:
+                    null_cnt = evidence.get("count_null") or raw_ev.get("count_null", 0)
+                    valid_cnt = evidence.get("count_valid") or raw_ev.get("count_valid")
+                    valid_str = f" across {valid_cnt:,} valid records" if valid_cnt else ""
+                    null_str = f" ({null_cnt:,} missing value{'s were' if null_cnt > 1 else ' was'} excluded)" if null_cnt and null_cnt > 0 else ""
+                    answer_text = (
+                        f"The sample standard deviation of `{col}` is **{formatted_val}**"
+                        f"{valid_str} (calculated using unbiased sample standard deviation with ddof=1{null_str})."
+                    )
+                    key_points.append(f"Sample Standard Deviation of {col}: {formatted_val}")
+                    if valid_cnt:
+                        key_points.append(f"Sample Size: {valid_cnt} valid observations (ddof=1)")
+                    if null_cnt and null_cnt > 0:
+                        key_points.append(f"Missing Values Excluded: {null_cnt}")
+                    evidence_items.append(f"{col} sample std = {formatted_val} (ddof=1, n={valid_cnt}, nulls={null_cnt})")
+                elif rec_info and agg in ("max", "maximum", "min", "minimum"):
+                    id_candidates = ["order_id", "patient_id", "id", "customer_id", "product", "item", "category", "name", "department", "admission_date", "date"]
+                    found_keys = []
+                    for cand in id_candidates:
+                        for k in rec_info.keys():
+                            if k.lower() == cand and k not in found_keys:
+                                found_keys.append(k)
+                                break
+                    if not found_keys:
+                        found_keys = list(rec_info.keys())[:3]
+                    id_summary = ", ".join(f"{k}: `{rec_info[k]}`" for k in found_keys[:3])
+                    idx_str = f"record #{rec_idx}" if rec_idx is not None else "matching record"
+                    answer_text = f"The {agg} `{col}` is **{formatted_val}**, found in {idx_str} ({id_summary})."
+                    key_points.append(f"{agg.title()} Record: {idx_str} ({id_summary})")
+                    key_points.append(f"{agg.title()} {col}: {formatted_val}")
+                    evidence_items.append(f"Computed value: {formatted_val}")
+                else:
+                    answer_text = f"The {agg} `{col}` is **{formatted_val}**."
+                    key_points.append(f"{agg.title()} {col}: {formatted_val}")
+                    evidence_items.append(f"Computed value: {formatted_val}")
 
     # 3. TOP_N & BOTTOM_N
     elif intent in (QueryIntent.TOP_N.value, QueryIntent.BOTTOM_N.value):
@@ -164,12 +256,22 @@ def generate_query_answer(
                 top_entity = data.iloc[0, 0]
                 top_val = data.iloc[0, 1]
                 val_str = f"{top_val:,.2f}" if isinstance(top_val, (int, float)) else str(top_val)
+                agg_type = query_plan.get("aggregation") or "value"
+                agg_prefix = "average " if agg_type == "mean" else ("total " if agg_type == "sum" else "")
+                grp_col_lower = str(group_by[0]).lower()
                 if limit == 1:
-                    answer_text = f"**{top_entity}** has the highest `{col}` at **{val_str}**."
+                    if grp_col_lower in ("date", "order_date", "day"):
+                        answer_text = f"The highest-sales day was **{top_entity}** with {agg_prefix}`{col}` of **{val_str}**."
+                    else:
+                        answer_text = f"**{top_entity}** has the highest {agg_prefix}`{col}` at **{val_str}**."
                 else:
                     direction = "top" if intent == QueryIntent.TOP_N.value else "bottom"
-                    answer_text = f"Here are the {direction} {len(data)} `{group_by[0]}` items ranked by `{col}`. **{top_entity}** ranks first with **{val_str}**."
-                for _, r in data.head(3).iterrows():
+                    rank_label = f"{agg_prefix}`{col}`" if agg_prefix else f"`{col}`"
+                    if grp_col_lower in ("order_id", "order", "id"):
+                        answer_text = f"Here are the {direction} {len(data)} orders ranked by {rank_label}. Order **#{top_entity}** ranks first with **{val_str}**."
+                    else:
+                        answer_text = f"Here are the {direction} {len(data)} `{group_by[0]}` items ranked by {rank_label}. **{top_entity}** ranks first with **{val_str}**."
+                for _, r in data.head(5).iterrows():
                     key_points.append(f"{r.iloc[0]}: {r.iloc[1]:,.2f}" if isinstance(r.iloc[1], (int, float)) else f"{r.iloc[0]}: {r.iloc[1]}")
                     evidence_items.append(f"{r.iloc[0]} -> {r.iloc[1]}")
             else:
@@ -388,11 +490,297 @@ def generate_query_answer(
         key_points.append(f"P-value: {chi_details.get('p_value')}, Cramér's V: {chi_details.get('cramers_v')}")
         limitations.append("Chi-square evaluates non-parametric categorical association, not causality.")
 
+    elif intent == QueryIntent.DATA_TYPES.value:
+        tot_cols = evidence.get("total_columns") or evidence.get("raw_evidence", {}).get("total_columns") or row_count
+        num_cols = evidence.get("numeric_columns", [])
+        answer_text = f"There are **{tot_cols} columns** (features) in `{dataset_name}`."
+        if num_cols:
+            answer_text += f" Including {len(num_cols)} numerical columns ({', '.join(f'`{c}`' for c in num_cols[:4])}{'...' if len(num_cols) > 4 else ''})."
+        key_points.append(f"Total Columns: {tot_cols}")
+        if num_cols:
+            key_points.append(f"Numerical Columns: {len(num_cols)}")
+        evidence_items.append(f"Schema count: {tot_cols} columns")
+
+    elif intent == QueryIntent.DESCRIPTIVE_STATISTICS.value:
+        col = query_plan.get("column")
+        if col and isinstance(data, pd.DataFrame) and "Statistic" in data.columns:
+            stats_dict = dict(zip(data["Statistic"], data["Value"]))
+            mean_s = stats_dict.get("Mean", "N/A")
+            med_s = stats_dict.get("Median (50%)", "N/A")
+            std_s = stats_dict.get("Standard Deviation", "N/A")
+            min_s = stats_dict.get("Minimum", "N/A")
+            max_s = stats_dict.get("Maximum", "N/A")
+            cnt_s = stats_dict.get("Count (valid)", str(row_count))
+            answer_text = f"Statistical distribution for `{col}` in `{dataset_name}`:\n• **Mean**: {mean_s} | **Median**: {med_s} | **Std Dev**: {std_s}\n• **Min**: {min_s} | **Max**: {max_s} (from {cnt_s} valid observations)."
+            key_points.append(f"Mean: {mean_s}, Median: {med_s}")
+            key_points.append(f"Min: {min_s}, Max: {max_s}")
+        else:
+            feat_cnt = len(evidence.get("features_described", [])) or (len(data) if isinstance(data, pd.DataFrame) else 0)
+            answer_text = f"Statistical distribution breakdown across {feat_cnt} numerical features in `{dataset_name}`."
+            key_points.append(f"Described features: {feat_cnt}")
+        evidence_items.append(f"Computed descriptive statistics for `{dataset_name}`")
+
+    elif intent == QueryIntent.INSIGHT_SUMMARY.value:
+        q_low = question.lower()
+        tot_r = evidence.get("total_rows", row_count)
+        tot_c = evidence.get("total_columns", len(data.columns) if isinstance(data, pd.DataFrame) else 0)
+        tot_m = evidence.get("total_missing", 0)
+
+        if any(w in q_low for w in ["dimension", "dimensions", "shape", "how big", "size"]):
+            answer_text = f"The dataset `{dataset_name}` has **{tot_r:,} rows** and **{tot_c} columns** ({tot_r * max(tot_c, 1):,} total data cells)."
+            key_points.append(f"Dimensions: {tot_r:,} rows × {tot_c} columns")
+            if tot_m > 0:
+                key_points.append(f"Missing Values: {tot_m:,}")
+            else:
+                key_points.append("Data Completeness: 100% (0 missing values)")
+        else:
+            insights = evidence.get("automated_insights", [])
+            answer_text = f"Executive Analytical Summary for `{dataset_name}` (**{tot_r:,} rows**, **{tot_c} columns**):\n"
+            if insights:
+                points_txt = [f"• **{ins['type']}**: {ins['statement']}" for ins in insights[:4]]
+                answer_text += "\n".join(points_txt)
+                for ins in insights[:3]:
+                    key_points.append(f"{ins['type']}: {ins['metric']}")
+            else:
+                answer_text += f"The dataset contains {tot_r:,} records across {tot_c} columns with {tot_m:,} missing values detected."
+                key_points.append(f"Scale: {tot_r:,} rows, {tot_c} columns")
+        evidence_items.append(f"Dataset overview: {tot_r:,} rows, {tot_c} columns")
+
+    # 13. PERCENTAGE CONTRIBUTION / SHARE OF TOTAL
+    elif intent == QueryIntent.PERCENTAGE_CONTRIBUTION.value:
+        grp_col = evidence.get("group_column", "group")
+        meas_col = evidence.get("measure_column", "amount")
+        tot_amt = evidence.get("total_amount", 0.0)
+        top_grp = evidence.get("top_group", "")
+        top_pct = evidence.get("top_percentage", 0.0)
+        top_amt = evidence.get("top_amount", 0.0)
+
+        answer_text = (
+            f"Percentage contribution breakdown across `{grp_col}` in `{dataset_name}` (Total: **${tot_amt:,.2f}**):\n"
+            f"**{top_grp}** accounts for the largest share at **{top_pct:.1f}%** (${top_amt:,.2f})."
+        )
+        if isinstance(data, pd.DataFrame) and not data.empty:
+            for _, r in data.iterrows():
+                grp_v = r.iloc[0]
+                amt_v = r.iloc[1]
+                pct_v = r.iloc[2]
+                key_points.append(f"{grp_v}: {pct_v:.1f}% (${amt_v:,.2f})")
+                evidence_items.append(f"{grp_col} '{grp_v}': share={pct_v}%, total={amt_v}")
+        else:
+            key_points.append(f"Top Contributor: {top_grp} ({top_pct:.1f}%)")
+            key_points.append(f"Total Amount: ${tot_amt:,.2f}")
+
+    # 14. FREQUENCY / MOST COMMON CATEGORY
+    elif intent == QueryIntent.FREQUENCY.value:
+        col = evidence.get("column", "category")
+        top_val = evidence.get("most_frequent_value", "")
+        top_cnt = evidence.get("frequency_count", 0)
+        top_share = evidence.get("percentage_share", 0.0)
+        tot_records = evidence.get("total_records", row_count)
+        dist_cats = evidence.get("distinct_categories", 0)
+
+        answer_text = (
+            f"The most frequently used `{col}` in `{dataset_name}` is **{top_val}**, "
+            f"occurring in **{top_cnt:,} of {tot_records:,} records** (**{top_share:.1f}%** of total)."
+        )
+        key_points.append(f"Most Frequent {col}: {top_val} ({top_cnt:,} occurrences, {top_share:.1f}%)")
+        key_points.append(f"Total Records Evaluated: {tot_records:,}")
+        if dist_cats:
+            key_points.append(f"Distinct Categories: {dist_cats}")
+        evidence_items.append(f"Mode for {col}: '{top_val}' with frequency {top_cnt}/{tot_records}")
+
+    # 15. AVERAGE ORDER VALUE (AOV)
+    elif intent == QueryIntent.AVERAGE_ORDER_VALUE.value:
+        aov = evidence.get("aov", 0.0)
+        tot_rev = evidence.get("total_revenue", 0.0)
+        dist_orders = evidence.get("distinct_orders", 0)
+        ord_col = evidence.get("order_column") or "Order Records"
+        has_id = evidence.get("has_order_id", False)
+
+        basis_str = f"distinct orders (`{ord_col}`)" if has_id else "individual transaction records"
+        answer_text = (
+            f"The Average Order Value (AOV) for `{dataset_name}` is **${aov:,.2f}**.\n\n"
+            f"This is calculated from a total revenue of **${tot_rev:,.2f}** across **{dist_orders:,} {basis_str}**."
+        )
+        key_points.append(f"Average Order Value: ${aov:,.2f}")
+        key_points.append(f"Total Revenue: ${tot_rev:,.2f}")
+        key_points.append(f"Order Volume: {dist_orders:,} ({basis_str})")
+        evidence_items.append(f"AOV = ${tot_rev:,.2f} / {dist_orders} = ${aov:,.2f}")
+
+    # 16. PROFITABILITY
+    elif intent == QueryIntent.PROFITABILITY.value:
+        top_prod = evidence.get("top_product", "")
+        top_val = evidence.get("top_value", 0.0)
+        has_true_profit = evidence.get("has_true_profit", False)
+        metric_used = evidence.get("metric_used", "profit")
+        assumption = evidence.get("assumption", "")
+
+        if has_true_profit:
+            answer_text = (
+                f"The most profitable product in `{dataset_name}` is **{top_prod}** "
+                f"with total profit of **${top_val:,.2f}**."
+            )
+            key_points.append(f"Top Product: {top_prod}")
+            key_points.append(f"Total Profit: ${top_val:,.2f}")
+        else:
+            answer_text = (
+                f"**Notice on Profitability:** True product profitability cannot be definitively determined "
+                f"because product cost, COGS, or margin data is not present in `{dataset_name}`.\n\n"
+                f"Based on available sales data, **{top_prod}** generated the highest gross sales revenue at **${top_val:,.2f}**.\n\n"
+                f"**Assumptions:** Stated under the operational assumption of uniform profit margins across products in the absence of explicit cost records."
+            )
+            key_points.append(f"Highest Revenue Product: {top_prod} (${top_val:,.2f})")
+            key_points.append("Proxy Metric: Gross Sales Revenue (Profitability proxy)")
+            limitations.append("True profitability requires product cost or margin data not present in this dataset.")
+        if assumption:
+            key_points.append(f"Assumption: {assumption}")
+        evidence_items.append(f"Top product by {metric_used}: {top_prod} = {top_val}")
+
+    # 17. MULTI-PART DASHBOARD
+    elif intent == QueryIntent.DASHBOARD.value:
+        summary_metrics = evidence.get("summary_metrics", {})
+        reg_breakdown = evidence.get("region_breakdown", {})
+        cat_breakdown = evidence.get("category_breakdown", {})
+        unsupported = evidence.get("unsupported_metrics", [])
+
+        metric_lines = []
+        for k, v in summary_metrics.items():
+            val_fmt = f"{v:,}" if "total order" in k.lower() else (f"${v:,.2f}" if isinstance(v, (int, float)) else f"{v}")
+            metric_lines.append(f"• **{k}**: {val_fmt}")
+            key_points.append(f"{k}: {val_fmt}")
+
+        if reg_breakdown:
+            top_r = list(reg_breakdown.items())[0]
+            metric_lines.append(f"• **Top Region**: {top_r[0]} (${top_r[1]:,.2f})")
+            key_points.append(f"Leading Region: {top_r[0]} (${top_r[1]:,.2f})")
+        if cat_breakdown:
+            top_c = list(cat_breakdown.items())[0]
+            metric_lines.append(f"• **Top Category**: {top_c[0]} (${top_c[1]:,.2f})")
+            key_points.append(f"Leading Category: {top_c[0]} (${top_c[1]:,.2f})")
+
+        answer_text = f"Executive Analytical Dashboard for `{dataset_name}`:\n\n" + "\n".join(metric_lines)
+
+        if unsupported:
+            answer_text += "\n\n**Schema Limitations:**\n" + "\n".join(f"• {u}" for u in unsupported)
+            for u in unsupported:
+                limitations.append(u)
+
+        evidence_items.append(f"Compiled multi-metric dashboard across {len(summary_metrics)} core KPIs")
+
+    # 18. COMPARE GROUPS
+    elif intent == QueryIntent.COMPARE_GROUPS.value:
+        grp_col = evidence.get("group_col", "group")
+        metric_col = evidence.get("metric_col", "metric")
+        agg = evidence.get("aggregation", "total")
+        top_grp = evidence.get("top_group")
+        top_val = evidence.get("top_value")
+        sec_grp = evidence.get("second_group")
+        sec_val = evidence.get("second_value")
+
+        if top_grp and sec_grp:
+            diff_val = top_val - sec_val if (top_val is not None and sec_val is not None) else 0.0
+            pct_val = (diff_val / sec_val * 100.0) if sec_val and sec_val != 0 else 0.0
+            answer_text = (
+                f"Comparison of `{agg}` `{metric_col}` between **{top_grp}** and **{sec_grp}** in `{dataset_name}`:\n\n"
+                f"• **{top_grp}**: ${top_val:,.2f}\n"
+                f"• **{sec_grp}**: ${sec_val:,.2f}\n\n"
+                f"**{top_grp}** generated **${diff_val:,.2f}** ({pct_val:+.1f}%) more than **{sec_grp}**."
+            )
+            key_points.append(f"{top_grp}: ${top_val:,.2f}")
+            key_points.append(f"{sec_grp}: ${sec_val:,.2f}")
+            key_points.append(f"Difference: ${diff_val:,.2f} ({pct_val:+.1f}%)")
+            evidence_items.append(f"Group comparison: {top_grp}=${top_val:,.2f} vs {sec_grp}=${sec_val:,.2f}")
+        elif isinstance(data, pd.DataFrame) and not data.empty:
+            answer_text = f"Comparison of `{agg}` `{metric_col}` by `{grp_col}` across {len(data)} groups."
+            for _, r in data.iterrows():
+                key_points.append(f"{r.iloc[0]}: ${r.iloc[1]:,.2f}" if isinstance(r.iloc[1], (int, float)) else f"{r.iloc[0]}: {r.iloc[1]}")
+        else:
+            answer_text = f"Compared `{metric_col}` across groups in `{dataset_name}`."
+
+    # 19. GROUP BY
+    elif intent == QueryIntent.GROUP_BY.value:
+        col = query_plan.get("column") or "metric"
+        agg = query_plan.get("aggregation") or "sum"
+        group_by = query_plan.get("group_by", [])
+        grp_name = group_by[0] if group_by else "group"
+        if isinstance(data, pd.DataFrame) and not data.empty:
+            top_entity = data.iloc[0, 0]
+            top_val = data.iloc[0, 1]
+            val_str = f"{top_val:,.2f}" if isinstance(top_val, (int, float)) else str(top_val)
+            answer_text = f"Breakdown of {agg} `{col}` grouped by `{grp_name}` across {len(data)} categories. **{top_entity}** is highest with **{val_str}**."
+            for _, r in data.head(5).iterrows():
+                key_points.append(f"{r.iloc[0]}: {r.iloc[1]:,.2f}" if isinstance(r.iloc[1], (int, float)) else f"{r.iloc[0]}: {r.iloc[1]}")
+                evidence_items.append(f"{r.iloc[0]} -> {r.iloc[1]}")
+        else:
+            answer_text = f"Computed {agg} `{col}` grouped by `{grp_name}`."
+
+    # 20. COMPLEX SUBQUERY & MULTI-STAGE ANALYSIS (Section 6)
+    elif intent == QueryIntent.COMPLEX_SUBQUERY.value:
+        raw_ev = evidence.get("raw_evidence", {}) or evidence
+        sub_type = raw_ev.get("subquery_type") or query_plan.get("metadata", {}).get("subquery_type", "entity_average_comparison")
+        ent_col = raw_ev.get("entity_column") or query_plan.get("metadata", {}).get("entity_column", "Category")
+        met_col = raw_ev.get("metric_column") or query_plan.get("column", "Metric")
+        m_count = raw_ev.get("matching_entities_count", row_count)
+        t_count = raw_ev.get("total_entities_evaluated", row_count)
+        thresh = raw_ev.get("average_threshold", 0.0)
+        comp_word = raw_ev.get("comparison_desc", "above")
+
+        if sub_type == "compare_against_overall":
+            o_total = raw_ev.get("overall_total", 0.0)
+            answer_text = (
+                f"Analysis comparing each `{ent_col}` against the overall `{met_col}` (Grand Total: **{o_total:,.2f}**):\n\n"
+                f"Below is the breakdown showing each `{ent_col}`'s total revenue and percentage share of overall revenue."
+            )
+            key_points.append(f"Overall Total {met_col}: {o_total:,.2f}")
+            key_points.append(f"Categories Evaluated: {row_count}")
+        else:
+            answer_text = (
+                f"Found **{m_count}** `{ent_col}` item(s) (out of {t_count}) whose total `{met_col}` is **{comp_word}** "
+                f"the overall average {ent_col.lower()} total of **{thresh:,.2f}**."
+            )
+            key_points.append(f"Threshold (Average {ent_col} {met_col}): {thresh:,.2f}")
+            key_points.append(f"{ent_col.title()}s Exceeding Threshold: {m_count} of {t_count}")
+            top_ents = raw_ev.get("top_entities", [])
+            if top_ents:
+                evidence_items.append(f"Top matching {ent_col}s: {', '.join(str(e) for e in top_ents[:3])}")
+
+    # 21. SHOW DATA / PREVIEW
+    elif intent == QueryIntent.SHOW_DATA.value:
+        raw_ev = evidence.get("raw_evidence", {}) or evidence
+        tot_r = raw_ev.get("total_filtered_rows") or evidence.get("total_rows") or row_count
+        answer_text = f"Displaying a sample preview of `{dataset_name}` (showing first **{row_count}** records in the table below)."
+        key_points.append(f"Preview records shown: {row_count}")
+        key_points.append(f"Total dataset records: {tot_r:,}")
+        evidence_items.append(f"Dataset preview: {row_count} rows displayed")
+
+    # 22. DATA QUALITY REPORT
+    elif intent == QueryIntent.DATA_QUALITY_REPORT.value:
+        raw_ev = evidence.get("raw_evidence", {}) or evidence
+        comp_pct = raw_ev.get("completeness_pct", 100.0)
+        dup_cnt = raw_ev.get("duplicate_rows", 0)
+        miss_cnt = raw_ev.get("missing_cells", 0)
+        out_cnt = raw_ev.get("outlier_rows", 0)
+        rating = raw_ev.get("health_rating", "Good")
+        answer_text = (
+            f"Comprehensive Data Quality Audit for `{dataset_name}`: Overall health status is **{rating}** "
+            f"with **{comp_pct}% data completeness**. Detected **{miss_cnt:,}** missing values, "
+            f"**{dup_cnt:,}** duplicate rows, and **{out_cnt:,}** outlier observations."
+        )
+        key_points.append(f"Overall Quality Rating: {rating}")
+        key_points.append(f"Data Completeness: {comp_pct}%")
+        key_points.append(f"Missing Values: {miss_cnt:,}")
+        key_points.append(f"Duplicate Records: {dup_cnt:,}")
+        key_points.append(f"Flagged Outlier Records: {out_cnt:,}")
+        evidence_items.append(f"Data Quality Audit: {rating} ({comp_pct}% complete, {miss_cnt} nulls, {dup_cnt} dupes, {out_cnt} outliers)")
+
     # Fallback default
     else:
-        answer_text = f"Query executed successfully on `{dataset_name}`. Displaying {row_count} computed records."
-        key_points.append(f"Records returned: {row_count}")
-        evidence_items.append(f"Row count: {row_count}")
+        answer_text = (
+            f"I could not conclusively map your question to a supported column or analytical operation in `{dataset_name}`. "
+            f"Please verify the column names and try asking about record counts, missing values, summary statistics, rankings, or trends."
+        )
+        key_points.append("Clarification requested: question not mapped to dataset schema.")
+        evidence_items.append("Unmapped query intent")
 
     # Append column selection explanation if lineage established preference
     selection_expl = query_plan.get("metadata", {}).get("selection_explanation") or evidence.get("selection_explanation")
@@ -402,6 +790,13 @@ def generate_query_answer(
     # Append data source notice
     if source_label:
         evidence_items.append(source_label)
+
+    # Append dataset mismatch notification (Section 9E)
+    ds_mismatch = query_plan.get("metadata", {}).get("dataset_mismatch_warning")
+    if ds_mismatch:
+        if ds_mismatch not in limitations:
+            limitations.append(ds_mismatch)
+        answer_text = f"{answer_text}\n\n*Dataset Notice:* {ds_mismatch}"
 
     return {
         "answer": answer_text,

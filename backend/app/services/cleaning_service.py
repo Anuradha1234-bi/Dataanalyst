@@ -937,10 +937,19 @@ class DataCleaningService:
             if col not in cleaned.columns:
                 continue
 
-            try:
-                parsed_dates = pd.to_datetime(cleaned[col], errors="coerce", format="mixed")
-            except (TypeError, ValueError):
-                parsed_dates = pd.to_datetime(cleaned[col], errors="coerce")
+            col_series = cleaned[col]
+            if pd.api.types.is_numeric_dtype(col_series):
+                num_s = pd.to_numeric(col_series, errors="coerce")
+                if (num_s.dropna() < 1e8).all():
+                    # Small numbers are IDs, amounts, or counts - parse as string so they fail rather than becoming 1970-01-01
+                    parsed_dates = pd.to_datetime(col_series.astype(str), errors="coerce")
+                else:
+                    parsed_dates = pd.to_datetime(col_series, errors="coerce")
+            else:
+                try:
+                    parsed_dates = pd.to_datetime(col_series.astype(str), errors="coerce", format="mixed")
+                except (TypeError, ValueError):
+                    parsed_dates = pd.to_datetime(col_series.astype(str), errors="coerce")
             valid_count = int(parsed_dates.notnull().sum())
             fmt = dc.output_format or "%Y-%m-%d"
 
@@ -1179,11 +1188,11 @@ class DataCleaningService:
         """Compute dry-run transformation metrics without touching disk files."""
         ops_json = operations.model_dump_json() if hasattr(operations, "model_dump_json") else json.dumps(operations.model_dump(), sort_keys=True)
         ops_hash = hashlib.sha256(ops_json.encode()).hexdigest()[:16]
-        cache_key = f"{cls._get_cache_key(dataset, active=False)}_preview_{ops_hash}"
+        cache_key = f"{cls._get_cache_key(dataset, active=True)}_preview_{ops_hash}"
         if cache_key in cls._analysis_cache:
             return cls._analysis_cache[cache_key]
 
-        before_df = cls._get_dataframe(dataset, active=False)
+        before_df = cls._get_dataframe(dataset, active=True)
         before_metrics = cls.calculate_metrics(before_df)
 
         cleaned_df, ops, type_changes, detailed_ops, blank_conv, col_changed, col_mapping = cls.execute_cleaning_pipeline(before_df, operations)
@@ -1240,7 +1249,8 @@ class DataCleaningService:
                 detail=f"Original dataset file '{dataset.filename}' not found on storage disk.",
             )
 
-        before_df = cls._get_dataframe(dataset, active=False)
+        orig_df = cls._get_dataframe(dataset, active=False)
+        before_df = cls._get_dataframe(dataset, active=True)
         before_metrics = cls.calculate_metrics(before_df)
 
         cleaned_df, ops, _, detailed_ops, _, _, _ = cls.execute_cleaning_pipeline(before_df, operations)
@@ -1292,9 +1302,9 @@ class DataCleaningService:
             dop_dict["date"] = now_str
             detailed_ops_dicts.append(dop_dict)
 
-        # Automatic post-cleaning validation & quality score
-        score, deductions, c_status, s_status, comp_scores = cls.calculate_cleaning_score(cleaned_df, dataset, before_df=before_df)
-        val_report = cls._run_validation_comparison(dataset, before_df, cleaned_df)
+        # Automatic post-cleaning validation & quality score measured against baseline original
+        score, deductions, c_status, s_status, comp_scores = cls.calculate_cleaning_score(cleaned_df, dataset, before_df=orig_df)
+        val_report = cls._run_validation_comparison(dataset, orig_df, cleaned_df)
 
         # Record in AnalysisHistory audit log
         history_entry = AnalysisHistory(
@@ -1575,6 +1585,37 @@ class DataCleaningService:
         return total_outliers, col_outliers
 
     @classmethod
+    def _is_candidate_date_column(cls, col_name: str, series: pd.Series) -> bool:
+        """Narrowly determine if a column is intended to represent dates, avoiding false positives on numeric IDs/amounts."""
+        if pd.api.types.is_datetime64_any_dtype(series):
+            return True
+        if pd.api.types.is_numeric_dtype(series) or pd.api.types.is_bool_dtype(series):
+            return False
+
+        col_l = str(col_name).lower().strip()
+        # Explicit non-date patterns (IDs, amounts, counts, prices, etc.)
+        non_date_terms = ["_id", "id", "amount", "price", "quantity", "qty", "count", "cost", "total", "rate", "salary"]
+        if any(term == col_l or col_l.endswith(f"_{term}") or col_l.endswith(f" {term}") or col_l.startswith(f"{term}_") for term in non_date_terms):
+            if "date" not in col_l and "time" not in col_l:
+                return False
+
+        date_indicators = ["date", "time", "timestamp", "datetime", "dob", "birth", "joining", "hired", "expiry"]
+        has_date_term = any(ind in col_l for ind in date_indicators)
+        if not has_date_term:
+            return False
+
+        # Verify a non-empty sample is at least partially date parseable
+        non_null_d = series.dropna().astype(str).str.strip()
+        non_null_d = non_null_d[non_null_d != ""].head(30)
+        if len(non_null_d) == 0:
+            return False
+        try:
+            parsed = pd.to_datetime(non_null_d, errors="coerce")
+            return bool((parsed.notnull().sum() / len(non_null_d)) >= 0.25)
+        except Exception:
+            return False
+
+    @classmethod
     def _compute_hygiene_metrics(cls, df: pd.DataFrame, dataset: Optional[Dataset] = None) -> Dict[str, Any]:
         """Compute exact issue counts for the 6 scoring metrics and secondary checks."""
         # 1. Missing Values: null/NaN cells
@@ -1616,8 +1657,7 @@ class DataCleaningService:
         invalid_dates_count = 0
         invalid_date_cols = []
         for col in df.columns:
-            col_l = str(col).lower()
-            if any(t in col_l for t in ["date", "time", "join", "exit", "birth", "hired", "order", "ship"]):
+            if cls._is_candidate_date_column(str(col), df[col]):
                 non_null_d = df[col].dropna().astype(str).str.strip()
                 non_null_d = non_null_d[non_null_d != ""]
                 if len(non_null_d) > 0:
@@ -1702,7 +1742,10 @@ class DataCleaningService:
             rem = int(remaining_issues[metric])
 
             if init == 0:
-                comp_score = float(weight)
+                if rem == 0:
+                    comp_score = float(weight)
+                else:
+                    comp_score = 0.0
             elif rem >= init:
                 comp_score = 0.0
             else:
@@ -1957,6 +2000,14 @@ class DataCleaningService:
 
         score, deductions, c_status, score_status, comp_scores = cls.calculate_cleaning_score(df, dataset)
 
+        # Compute authoritative absolute data quality score for consistency
+        try:
+            from app.services.quality_service import DataQualityService
+            auth_quality_score, _, _, _ = DataQualityService.calculate_quality_score(df)
+            auth_quality_int = int(round(auth_quality_score))
+        except Exception:
+            auth_quality_int = score
+
         summary_res = CleaningDashboardSummaryResponse(
             dataset_id=dataset.id,
             dataset_name=dataset.filename,
@@ -1976,6 +2027,7 @@ class DataCleaningService:
             last_updated=last_updated,
             cleaning_status=c_status,
             cleaning_score=score,
+            quality_score=auth_quality_int,
             score_deductions=deductions,
             score_status=score_status,
             component_scores=comp_scores,
@@ -2524,11 +2576,11 @@ class DataCleaningService:
         """Dry-run preview of chained bulk cleaning operations with impact summary."""
         ops_json = operations.model_dump_json() if hasattr(operations, "model_dump_json") else json.dumps(operations.model_dump(), sort_keys=True)
         ops_hash = hashlib.sha256(ops_json.encode()).hexdigest()[:16]
-        cache_key = f"{cls._get_cache_key(dataset, active=False)}_bulk_preview_{ops_hash}"
+        cache_key = f"{cls._get_cache_key(dataset, active=True)}_bulk_preview_{ops_hash}"
         if cache_key in cls._analysis_cache:
             return cls._analysis_cache[cache_key]
 
-        before_df = cls._get_dataframe(dataset, active=False)
+        before_df = cls._get_dataframe(dataset, active=True)
         cleaned_df, ops, _, detailed_ops, blank_cells, col_names_changed, _ = cls.execute_cleaning_pipeline(before_df, operations)
 
         diffs, total_cells = cls._compute_cell_diffs(before_df, cleaned_df)
@@ -2687,8 +2739,12 @@ class DataCleaningService:
 
         m1 = cls._compute_hygiene_metrics(df1, dataset)
         m2 = cls._compute_hygiene_metrics(df2, dataset)
-        score1, _, _, status1, _ = cls.calculate_cleaning_score(df1, dataset)
-        score2, _, _, status2, _ = cls.calculate_cleaning_score(df2, dataset)
+        
+        score1, _, _, status1, _ = cls.calculate_cleaning_score(
+        df1, dataset, before_df=df1)
+        score2, _, _, status2, _ = cls.calculate_cleaning_score(
+        df2, dataset, before_df=df1)
+
 
         v1_metrics = {
             "rows": len(df1),

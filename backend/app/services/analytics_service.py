@@ -203,6 +203,18 @@ class AnalyticsService:
                 return "categorical"
             return "numeric"
 
+        # Email / URL / Phone heuristic -> text
+        if any(term in name_lower for term in ["email", "mail", "phone", "mobile", "url", "link", "website"]):
+            return "text"
+
+        # High cardinality Name heuristic -> text
+        if any(term in name_lower for term in ["name", "fname", "lname", "first_name", "last_name", "full_name"]) and (unique_count > 15 or (non_null_count > 10 and unique_count / non_null_count > 0.5)):
+            return "text"
+
+        # High-cardinality heuristic (too many distinct values for a useful category)
+        if non_null_count >= 15 and (unique_count / non_null_count) > 0.6:
+            return "text"
+
         # Categorical vs Text heuristic
         if unique_count <= 60 or (non_null_count > 0 and unique_count / non_null_count <= 0.3):
             return "categorical"
@@ -377,6 +389,25 @@ class AnalyticsService:
             )
         )
 
+        # Duplicate Column Name Detection (case/whitespace/underscore variants)
+        norm_map: Dict[str, List[str]] = {}
+        for col in df.columns:
+            norm_key = str(col).strip().lower().replace(" ", "_").replace("-", "_")
+            norm_map.setdefault(norm_key, []).append(str(col))
+
+        duplicate_col_warnings: List[str] = []
+        for norm_key, col_list in norm_map.items():
+            if len(col_list) > 1:
+                warn_msg = f"Potential duplicate column names detected: {', '.join(repr(c) for c in col_list)}. Column definitions are preserved without alteration."
+                duplicate_col_warnings.append(warn_msg)
+                warnings.append(warn_msg)
+
+        # Duplicate Rows Detection
+        duplicate_rows = int(df.duplicated().sum())
+        if duplicate_rows > 0:
+            dup_pct = round((duplicate_rows / max(total_rows, 1)) * 100, 2)
+            warnings.append(f"Dataset contains {duplicate_rows:,} duplicate rows ({dup_pct}% of total records).")
+
         return AnalyticsOverviewResponse(
             dataset_id=dataset.id,
             dataset_name=dataset.original_filename or dataset.filename,
@@ -386,6 +417,9 @@ class AnalyticsService:
             file_size_bytes=dataset.file_size_bytes or 0,
             created_at=dataset.created_at,
             updated_at=dataset.updated_at,
+            analysis_timestamp=datetime.now(),
+            duplicate_row_count=duplicate_rows,
+            duplicate_column_warnings=duplicate_col_warnings,
             column_summary=column_summaries,
             kpi_cards=kpi_cards,
             available_numeric_columns=numeric_cols,
@@ -480,6 +514,11 @@ class AnalyticsService:
                 title="No Data Available After Filtering",
                 x_axis_label=request.x_column or "Dimension",
                 y_axis_label=request.y_column or "Metric",
+                dataset_id=dataset.id,
+                dataset_name=dataset.original_filename or dataset.filename,
+                version=actual_version,
+                records_used=0,
+                records_excluded=len(df),
                 data_points=[],
                 table_data={"columns": [], "rows": []},
                 applied_filters=applied_filters,
@@ -511,6 +550,29 @@ class AnalyticsService:
         else:
             y_col = all_numeric[0] if all_numeric else None
 
+        # Intelligent Chart Recommendations & Validation based on actual dataset schema
+        recommendations: List[str] = []
+
+        if y_col and any(term in str(y_col).lower() for term in ["id", "code", "key", "pk", "uuid", "fk", "serial"]) and agg == "sum":
+            warnings.append(f"Summing identifier column '{y_col}' is statistically misleading. Consider using 'count' or selecting a numeric business metric.")
+
+        if all_categorical and all_numeric:
+            cat_sample = filtered_df[x_col] if x_col in filtered_df.columns else filtered_df[all_categorical[0]]
+            n_unique = cat_sample.nunique()
+            if 2 <= n_unique <= 7 and chart_type not in ["donut", "pie"]:
+                recommendations.append(f"Dimension '{cat_sample.name}' has {n_unique} distinct categories; a Donut or Pie Chart is highly effective.")
+
+        if y_col and y_col in filtered_df.columns:
+            s_num_check = pd.to_numeric(filtered_df[y_col], errors="coerce").dropna()
+            if len(s_num_check) > 5:
+                skew_val = float(s_num_check.skew())
+                if abs(skew_val) > 1.5 and agg in ["mean", "sum"]:
+                    recommendations.append(f"Metric '{y_col}' is heavily skewed ({skew_val:.2f}); Median aggregation provides a more representative central value.")
+
+        date_candidates = [c for c in filtered_df.columns if cls._classify_column_role(filtered_df[c], c) == "date"]
+        if date_candidates and chart_type != "line":
+            recommendations.append(f"Temporal column '{date_candidates[0]}' identified; a chronological Line Chart is recommended for trend analysis.")
+
         data_points: List[Dict[str, Any]] = []
         table_columns: List[str] = []
         table_rows: List[Dict[str, Any]] = []
@@ -524,7 +586,7 @@ class AnalyticsService:
 
         # ----------------- HISTOGRAM -----------------
         if chart_type == "histogram":
-            target_col = y_col or x_col
+            target_col = request.x_column if (request.x_column and request.x_column in filtered_df.columns) else (request.y_column if (request.y_column and request.y_column in filtered_df.columns) else (y_col or x_col))
             s_num = pd.to_numeric(filtered_df[target_col], errors="coerce").dropna()
             num_bins = max(3, min(request.bins or 10, 30))
             if len(s_num) > 0:
@@ -573,8 +635,8 @@ class AnalyticsService:
                 min_x = float(np.min(clean_x))
                 max_x = float(np.max(clean_x))
                 trendline = [
-                    {"x": round(min_x, 2), "y": round(slope * min_x + intercept, 2)},
-                    {"x": round(max_x, 2), "y": round(slope * max_x + intercept, 2)},
+                    {"x": float(round(float(min_x), 2)), "y": float(round(float(slope * min_x + intercept), 2))},
+                    {"x": float(round(float(max_x), 2)), "y": float(round(float(slope * max_x + intercept), 2))},
                 ]
 
             title = f"Scatter Correlation: {x_col} vs {y_col}"
@@ -701,16 +763,36 @@ class AnalyticsService:
 
             # Clean and sort
             res_series = res_series.dropna()
-            if is_desc:
-                res_series = res_series.sort_values(ascending=False)
+
+            # For time-series / date charts, sort chronologically ascending
+            is_date_trend = (chart_type == "line") or (cls._classify_column_role(filtered_df[x_col], x_col) == "date")
+            is_chronological = False
+
+            if is_date_trend:
+                try:
+                    parsed_dates = pd.to_datetime(res_series.index, errors="coerce")
+                    valid_mask = parsed_dates.notna()
+                    if valid_mask.sum() >= 2:
+                        res_series = res_series[valid_mask]
+                        parsed_dates = parsed_dates[valid_mask]
+                        res_series = res_series.iloc[parsed_dates.argsort()]
+                        is_chronological = True
+                except Exception:
+                    pass
+
+            if not is_chronological:
+                if is_desc:
+                    res_series = res_series.sort_values(ascending=False)
+                else:
+                    res_series = res_series.sort_values(ascending=True)
+                top_records = res_series.head(limit)
             else:
-                res_series = res_series.sort_values(ascending=True)
+                # Chronological trend preserves time ordering and shows up to 25 timeline points
+                trend_limit = max(limit, 25)
+                top_records = res_series.tail(trend_limit) if len(res_series) > trend_limit else res_series
 
-            # Limit records
-            top_records = res_series.head(limit)
-
-            # If Donut and items > 6, collapse excess to "Other"
-            if chart_type == "donut" and len(res_series) > 6:
+            # If Donut or Pie and items > 6, collapse excess to "Other"
+            if chart_type in ["donut", "pie"] and len(res_series) > 6:
                 main_slice = res_series.head(5)
                 other_val = res_series.iloc[5:].sum()
                 for k, v in main_slice.items():
@@ -741,11 +823,20 @@ class AnalyticsService:
                     "max": round(float(np.max(numeric_vals)), 2),
                 }
 
+        records_used = len(filtered_df)
+        records_excluded = max(0, len(df) - records_used)
+
         return AnalyticsChartResponse(
             chart_type=chart_type,
             title=title,
             x_axis_label=x_label,
             y_axis_label=y_label,
+            dataset_id=dataset.id,
+            dataset_name=dataset.original_filename or dataset.filename,
+            version=actual_version,
+            records_used=records_used,
+            records_excluded=records_excluded,
+            recommendations=recommendations,
             data_points=data_points,
             table_data={"columns": table_columns, "rows": table_rows},
             matrix=matrix,
@@ -801,8 +892,16 @@ class AnalyticsService:
                 warnings=warnings + ["Unable to parse datetime values from column."],
             )
 
+        # Calculate date range and observations
+        start_date_str = work_df[date_col].min().strftime("%Y-%m-%d") if not work_df.empty else None
+        end_date_str = work_df[date_col].max().strftime("%Y-%m-%d") if not work_df.empty else None
+        observations_count = len(work_df)
+
         # Bucket by interval
-        if interval == "monthly":
+        if interval == "quarterly":
+            work_df["bucket"] = work_df[date_col].dt.to_period("Q").dt.to_timestamp()
+            date_fmt = "quarterly"
+        elif interval == "monthly":
             work_df["bucket"] = work_df[date_col].dt.to_period("M").dt.to_timestamp()
             date_fmt = "%Y-%m"
         elif interval == "weekly":
@@ -811,6 +910,12 @@ class AnalyticsService:
         else:
             work_df["bucket"] = work_df[date_col].dt.to_period("D").dt.to_timestamp()
             date_fmt = "%Y-%m-%d"
+
+        def _fmt_ts(ts: pd.Timestamp) -> str:
+            if date_fmt == "quarterly":
+                q = (ts.month - 1) // 3 + 1
+                return f"{ts.year}-Q{q}"
+            return ts.strftime(date_fmt)
 
         grouped = work_df.groupby("bucket")[metric_col]
         if agg == "mean":
@@ -824,7 +929,7 @@ class AnalyticsService:
 
         data_points: List[Dict[str, Any]] = []
         for ts, val in ts_series.items():
-            dt_label = ts.strftime(date_fmt)
+            dt_label = _fmt_ts(ts)
             data_points.append({"label": dt_label, "date": ts.isoformat(), "value": round(float(val), 2)})
 
         # Period-over-period comparison
@@ -846,9 +951,9 @@ class AnalyticsService:
                 chg_dir = "baseline_zero"
 
             period_comp = PeriodComparison(
-                current_period_label=curr_t.strftime(date_fmt),
+                current_period_label=_fmt_ts(curr_t),
                 current_period_val=round(curr_v, 2),
-                prev_period_label=prev_t.strftime(date_fmt),
+                prev_period_label=_fmt_ts(prev_t),
                 prev_period_val=round(prev_v, 2),
                 change_pct=chg_pct,
                 change_direction=chg_dir,
@@ -877,6 +982,9 @@ class AnalyticsService:
             date_column=date_col,
             metric_column=metric_col,
             interval=interval,
+            start_date=start_date_str,
+            end_date=end_date_str,
+            observations_count=observations_count,
             data_points=data_points,
             previous_period_comparison=period_comp,
             trend_direction=trend_direction,
@@ -1040,16 +1148,25 @@ class AnalyticsService:
                     )
                 )
 
-        # Correlation Matrix
+        # Correlation Matrix (Filtered for valid non-constant features)
         corr_dict: Dict[str, Any] = {"columns": [], "matrix": []}
         if len(selected_cols) >= 2:
-            num_df = df[selected_cols].apply(pd.to_numeric, errors="coerce").dropna(how="all")
-            corr_mat = num_df.corr()
-            corr_dict["columns"] = list(corr_mat.columns)
-            corr_dict["matrix"] = [
-                [None if (math.isnan(v) or np.isnan(v)) else round(float(v), 2) for v in row]
-                for row in corr_mat.values
-            ]
+            valid_corr_cols = []
+            for c in selected_cols:
+                s_c = pd.to_numeric(df[c], errors="coerce").dropna()
+                if len(s_c) > 1 and s_c.nunique() > 1 and float(s_c.std()) > 0:
+                    valid_corr_cols.append(c)
+                else:
+                    limitations.append(f"Column '{c}' has constant or invariant values (zero variance) and was excluded from Pearson correlation.")
+
+            if len(valid_corr_cols) >= 2:
+                num_df = df[valid_corr_cols].apply(pd.to_numeric, errors="coerce")
+                corr_mat = num_df.corr(method="pearson")
+                corr_dict["columns"] = list(corr_mat.columns)
+                corr_dict["matrix"] = [
+                    [None if (math.isnan(v) or np.isnan(v)) else round(float(v), 2) for v in row]
+                    for row in corr_mat.values
+                ]
 
         return AnalyticsStatsResponse(
             descriptive_table=descriptive_rows,
@@ -1071,34 +1188,231 @@ class AnalyticsService:
 
         insights: List[AnalyticsInsightItem] = []
         total_rows = len(df)
+        total_cols = len(df.columns)
+
+        # Helper for identifier columns
+        def is_identifier(col_name: str, s: pd.Series) -> bool:
+            norm_name = str(col_name).strip().lower().replace(" ", "_").replace("-", "_")
+            if norm_name in ("id", "identifier", "row_id", "row_number", "index", "uuid", "guid", "key", "pk", "fk") or norm_name.endswith("_id") or norm_name.startswith("id_"):
+                return True
+            if (not pd.api.types.is_float_dtype(s)) and total_rows > 10 and s.nunique() == total_rows:
+                if any(k in norm_name for k in ("code", "num", "serial", "ref", "hash", "token")) or s.dtype == object:
+                    return True
+            return False
+
+        # Helper for checking if two columns have identical values
+        def are_exact_duplicates(s1: pd.Series, s2: pd.Series) -> bool:
+            if len(s1) != len(s2):
+                return False
+            # Check null match
+            s1_null = s1.isna()
+            s2_null = s2.isna()
+            if (s1_null ^ s2_null).any():
+                return False
+            valid_mask = ~s1_null
+            if not valid_mask.any():
+                return True  # both entirely null
+            if pd.api.types.is_numeric_dtype(s1) and pd.api.types.is_numeric_dtype(s2):
+                v1 = pd.to_numeric(s1[valid_mask], errors="coerce")
+                v2 = pd.to_numeric(s2[valid_mask], errors="coerce")
+                if v1.isna().any() or v2.isna().any():
+                    return bool((v1.isna() == v2.isna()).all())
+                return bool(np.isclose(v1, v2, rtol=1e-5, atol=1e-8).all())
+            else:
+                str1 = s1[valid_mask].astype(str).str.strip()
+                str2 = s2[valid_mask].astype(str).str.strip()
+                return bool((str1 == str2).all())
+
+        # If dataset is empty
+        if total_rows == 0 or total_cols == 0:
+            insights.append(
+                AnalyticsInsightItem(
+                    id="empty_dataset",
+                    type="data_quality",
+                    title="Empty Dataset Detected",
+                    statement="The selected dataset contains zero records or zero columns. Statistical analysis cannot be performed.",
+                    metric="0 Rows",
+                    columns_involved=[],
+                    confidence="High",
+                    severity="Critical",
+                    observations_used=0,
+                    calculation_method="Dataset dimension check: len(df) == 0",
+                    limitations="No records available for profiling.",
+                    next_step="Upload a populated dataset file with valid records.",
+                )
+            )
+            empty_charts = {
+                "severity_distribution": {
+                    "chart_type": "donut",
+                    "title": "Insight Severity Distribution",
+                    "data_points": [
+                        {"label": "Critical", "value": 1, "color": "#EF4444", "x": "Critical", "y": 1},
+                        {"label": "Warning", "value": 0, "color": "#F59E0B", "x": "Warning", "y": 0},
+                        {"label": "Informational", "value": 0, "color": "#4778E8", "x": "Informational", "y": 0},
+                    ],
+                },
+                "type_distribution": {
+                    "chart_type": "bar",
+                    "title": "Insights by Classification Type",
+                    "x_axis_label": "Classification Type",
+                    "y_axis_label": "Count",
+                    "data_points": [
+                        {"label": "General Data Quality", "value": 1, "color": "#9BA6B8", "x": "General Data Quality", "y": 1}
+                    ],
+                },
+                "missing_values": {"chart_type": "bar", "title": "Missing Values Analysis", "data_points": []},
+                "outlier_analysis": {"chart_type": "boxplot", "title": "Outlier & Quartile Distributions", "boxplot_data": []},
+                "correlation_heatmap": {"chart_type": "heatmap", "title": "Numeric Correlation Matrix", "categories": [], "matrix": []},
+                "numeric_distribution": {"chart_type": "histogram", "title": "Numeric Distribution", "data_points": []},
+                "category_distribution": {"chart_type": "bar", "title": "Category Distribution", "data_points": []},
+            }
+            return AnalyticsInsightsResponse(
+                dataset_id=dataset.id,
+                dataset_name=dataset.original_filename or dataset.filename,
+                version=actual_version,
+                total_rows=0,
+                total_columns=total_cols,
+                insights=insights,
+                charts_data=empty_charts,
+            )
+
         all_numeric = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
         all_categorical = [c for c in df.columns if not pd.api.types.is_numeric_dtype(df[c])]
 
-        # 1. Missing Value Concentration Insight
+        # 0. Duplicate Rows Check
+        dup_row_cnt = int(df.duplicated().sum())
+        if dup_row_cnt > 0:
+            dup_row_pct = (dup_row_cnt / total_rows) * 100
+            insights.append(
+                AnalyticsInsightItem(
+                    id="dup_rows_check",
+                    type="data_quality",
+                    title=f"Duplicate Records Present: {dup_row_cnt:,} rows",
+                    statement=f"Dataset contains {dup_row_cnt:,} exact duplicate rows ({dup_row_pct:.1f}% of total). Duplicate rows can bias statistical metrics and predictive model training.",
+                    metric=f"{dup_row_pct:.1f}% Duplicates",
+                    columns_involved=[],
+                    confidence="High",
+                    severity="Warning" if dup_row_pct >= 5.0 else "Informational",
+                    observations_used=total_rows,
+                    calculation_method=f"Row-wise deduplication count ({dup_row_cnt:,}) / total rows ({total_rows:,})",
+                    limitations="Row equality evaluated across all active columns.",
+                    next_step="Review data collection pipeline to assess whether duplicate rows represent legitimate identical events or logging redundancy.",
+                )
+            )
+
+        # 1. Duplicate / Redundant Columns Check
+        norm_map: Dict[str, List[str]] = {}
+        for c in df.columns:
+            norm_k = str(c).strip().lower().replace(" ", "_").replace("-", "_")
+            norm_map.setdefault(norm_k, []).append(str(c))
+
+        seen_dup_pairs = set()
+        for norm_k, col_group in norm_map.items():
+            if len(col_group) > 1:
+                for i in range(len(col_group)):
+                    for j in range(i + 1, len(col_group)):
+                        c1, c2 = col_group[i], col_group[j]
+                        pair_key = tuple(sorted([c1, c2]))
+                        if pair_key in seen_dup_pairs:
+                            continue
+                        seen_dup_pairs.add(pair_key)
+
+                        if are_exact_duplicates(df[c1], df[c2]):
+                            insights.append(
+                                AnalyticsInsightItem(
+                                    id=f"dup_col_exact_{norm_k}_{i}_{j}",
+                                    type="duplicate_columns",
+                                    title=f"Exact Duplicate Columns: {c1} & {c2}",
+                                    statement=f"Columns '{c1}' and '{c2}' share identical normalized naming and contain identical values across all {total_rows:,} records. One column is completely redundant and can be removed without losing information.",
+                                    metric="100% Value Match",
+                                    columns_involved=[c1, c2],
+                                    confidence="High",
+                                    severity="Warning",
+                                    observations_used=total_rows,
+                                    calculation_method="Full column-wise value comparison across all records",
+                                    limitations="Values matched identically across all valid and missing positions.",
+                                    next_step="Safely drop one column to eliminate redundancy and simplify downstream processing.",
+                                )
+                            )
+                        else:
+                            insights.append(
+                                AnalyticsInsightItem(
+                                    id=f"dup_col_{norm_k}_{i}_{j}",
+                                    type="duplicate_columns",
+                                    title=f"Potential Redundant Attributes: {c1} & {c2}",
+                                    statement=f"Columns '{c1}' and '{c2}' share normalized naming ('{norm_k}') but exhibit differing values. Verify if one is an updated version or a distinct metric.",
+                                    metric=f"{len(col_group)} matching features",
+                                    columns_involved=[c1, c2],
+                                    confidence="Moderate",
+                                    severity="Informational",
+                                    observations_used=total_rows,
+                                    calculation_method="Safe normalization comparison (case-insensitive & whitespace-stripped)",
+                                    limitations="Columns preserved unaltered; values differ between attributes.",
+                                    next_step="Inspect column definitions to clarify naming and determine whether both are required.",
+                                )
+                            )
+
+        # Pairwise exact value duplicates across different names (if <= 50 columns)
+        if len(df.columns) <= 50:
+            for i in range(len(df.columns)):
+                for j in range(i + 1, len(df.columns)):
+                    c1, c2 = str(df.columns[i]), str(df.columns[j])
+                    pair_key = tuple(sorted([c1, c2]))
+                    if pair_key in seen_dup_pairs:
+                        continue
+                    if are_exact_duplicates(df[c1], df[c2]):
+                        seen_dup_pairs.add(pair_key)
+                        insights.append(
+                            AnalyticsInsightItem(
+                                id=f"dup_col_exact_val_{c1}_{c2}",
+                                type="duplicate_columns",
+                                title=f"Exact Duplicate Content: {c1} & {c2}",
+                                statement=f"Columns '{c1}' and '{c2}' have different names but contain identical values across all {total_rows:,} rows. One column is entirely redundant.",
+                                metric="100% Value Match",
+                                columns_involved=[c1, c2],
+                                confidence="High",
+                                severity="Warning",
+                                observations_used=total_rows,
+                                calculation_method="Pairwise column value comparison across all rows",
+                                limitations="Identical values found across all records.",
+                                next_step="Confirm if one column can be pruned to prevent collinearity.",
+                            )
+                        )
+
+        # 2. Missing Value Concentration Insight
+        missing_stats = []
         for col in df.columns:
             null_cnt = int(df[col].isna().sum())
-            null_rate = (null_cnt / max(total_rows, 1)) * 100
+            null_rate = (null_cnt / total_rows) * 100 if total_rows > 0 else 0.0
+            if null_cnt > 0:
+                missing_stats.append((str(col), null_cnt, null_rate))
             if null_rate >= 10.0:
                 insights.append(
                     AnalyticsInsightItem(
                         id=f"missing_{col}",
                         type="missing_values",
                         title=f"Elevated Missing Rate: {col}",
-                        statement=f"Column '{col}' exhibits {null_cnt:,} missing entries ({null_rate:.1f}% of dataset). Imputation or deletion may alter statistical power.",
+                        statement=f"Column '{col}' exhibits {null_cnt:,} missing entries ({null_rate:.1f}% of dataset). Imputation, indicator tagging, or selective exclusion should be evaluated based on business context.",
                         metric=f"{null_rate:.1f}% Missing",
-                        columns_involved=[col],
+                        columns_involved=[str(col)],
                         confidence="High",
-                        severity="Warning" if null_rate > 25 else "Actionable",
-                        limitations="Missingness mechanism (MCAR vs MAR vs MNAR) unverified without longitudinal testing.",
+                        severity="Critical" if null_rate >= 50.0 else "Warning",
+                        observations_used=total_rows,
+                        calculation_method=f"Null cell frequency ({null_cnt:,}) / total rows ({total_rows:,})",
+                        limitations="Missingness mechanism (MCAR vs MAR vs MNAR) unverified without longitudinal testing. Do not delete or impute without considering feature context.",
+                        next_step="Evaluate if column is critical; apply mean/median imputation, sentinel categorical tagging, or investigate collection failures.",
                     )
                 )
 
-        # 2. Categorical Concentration (Pareto Dominance)
-        for col in all_categorical[:4]:
+        # 3. Categorical Concentration (Pareto Dominance)
+        for col in all_categorical:
+            if is_identifier(col, df[col]):
+                continue
             val_counts = df[col].dropna().value_counts()
             if len(val_counts) >= 2:
-                top_name = val_counts.index[0]
+                top_name = str(val_counts.index[0])
                 top_cnt = int(val_counts.iloc[0])
+                non_null_c = int(df[col].count())
                 top_pct = (top_cnt / max(total_rows, 1)) * 100
                 if top_pct >= 45.0:
                     insights.append(
@@ -1106,86 +1420,407 @@ class AnalyticsService:
                             id=f"conc_{col}",
                             type="concentration",
                             title=f"High Category Dominance: {col}",
-                            statement=f"Category '{top_name}' constitutes {top_pct:.1f}% ({top_cnt:,} occurrences) of all records in '{col}'.",
+                            statement=f"Category '{top_name}' constitutes {top_pct:.1f}% ({top_cnt:,} occurrences of {non_null_c:,} non-null records) in '{col}'.",
                             metric=f"{top_pct:.1f}% Dominance",
-                            columns_involved=[col],
+                            columns_involved=[str(col)],
                             confidence="High",
-                            severity="Informational",
-                            limitations="Class imbalance may bias general aggregations if unstratified.",
+                            severity="Warning" if top_pct >= 80.0 else "Informational",
+                            observations_used=non_null_c,
+                            calculation_method=f"Top category mode frequency ({top_cnt:,}) / valid non-null rows ({non_null_c:,})",
+                            limitations="Class imbalance may bias aggregations or model training if unstratified.",
+                            next_step="Apply stratified sampling or group-level normalization when training models.",
                         )
                     )
 
-        # 3. Strong Pairwise Correlation
-        if len(all_numeric) >= 2:
-            num_df = df[all_numeric].apply(pd.to_numeric, errors="coerce").dropna(how="all")
+        # 4. Strong Pairwise Correlation
+        valid_numeric_for_corr = []
+        for c in all_numeric:
+            if not is_identifier(c, df[c]):
+                s_c = pd.to_numeric(df[c], errors="coerce").dropna()
+                if len(s_c) >= 2 and float(s_c.std()) > 0:
+                    valid_numeric_for_corr.append(c)
+
+        if len(valid_numeric_for_corr) >= 2:
+            num_df = df[valid_numeric_for_corr].apply(pd.to_numeric, errors="coerce")
             corr = num_df.corr()
             seen_pairs = set()
-            for c1 in all_numeric:
-                for c2 in all_numeric:
+            for c1 in valid_numeric_for_corr:
+                for c2 in valid_numeric_for_corr:
                     if c1 != c2 and (c2, c1) not in seen_pairs:
                         seen_pairs.add((c1, c2))
                         r = corr.loc[c1, c2]
                         if not math.isnan(r) and abs(r) >= 0.65:
+                            paired_valid = int(num_df[[c1, c2]].dropna().shape[0])
                             polarity = "positive" if r > 0 else "inverse"
                             insights.append(
                                 AnalyticsInsightItem(
                                     id=f"corr_{c1}_{c2}",
                                     type="correlation",
                                     title=f"Strong {polarity.capitalize()} Association: {c1} & {c2}",
-                                    statement=f"Attributes '{c1}' and '{c2}' demonstrate a strong {polarity} linear association (Pearson r = {r:.2f}).",
+                                    statement=f"Attributes '{c1}' and '{c2}' demonstrate a strong {polarity} linear association (Pearson r = {r:.2f}). Note: high correlation indicates co-movement, not identity or causal dependency.",
                                     metric=f"r = {r:.2f}",
                                     columns_involved=[c1, c2],
                                     confidence="High",
-                                    severity="Actionable",
-                                    limitations="Association does NOT establish causal relationship; potential third-variable confounders.",
+                                    severity="Warning" if abs(r) >= 0.90 else "Informational",
+                                    observations_used=paired_valid,
+                                    calculation_method=f"Bivariate Pearson correlation r on paired non-missing observations (n={paired_valid:,})",
+                                    limitations="Association denotes strictly linear co-movement and does NOT establish causal relationship.",
+                                    next_step="Inspect for collinearity or confounding variables prior to regression modeling.",
                                 )
                             )
 
-        # 4. Outlier Concentration
-        for col in all_numeric[:4]:
+        # 5. Outlier Detection (Tukey 1.5x IQR)
+        outlier_feature_stats = []
+        for col in all_numeric:
+            if is_identifier(col, df[col]):
+                continue
             s_num = pd.to_numeric(df[col], errors="coerce").dropna()
             if len(s_num) >= 10:
-                q25, q75 = s_num.quantile(0.25), s_num.quantile(0.75)
+                q25 = float(s_num.quantile(0.25))
+                q75 = float(s_num.quantile(0.75))
                 iqr = q75 - q25
+                med = float(s_num.median())
+                min_v = float(s_num.min())
+                max_v = float(s_num.max())
+                lower_b = q25 - 1.5 * iqr
+                upper_b = q75 + 1.5 * iqr
+
                 if iqr > 0:
-                    outliers = s_num[(s_num < (q25 - 1.5 * iqr)) | (s_num > (q75 + 1.5 * iqr))]
+                    outliers = s_num[(s_num < lower_b) | (s_num > upper_b)]
                     o_cnt = len(outliers)
                     o_pct = (o_cnt / len(s_num)) * 100
-                    if o_pct >= 4.0:
+                    outlier_feature_stats.append({
+                        "col": str(col),
+                        "min_val": min_v,
+                        "q1": q25,
+                        "median": med,
+                        "q3": q75,
+                        "max_val": max_v,
+                        "lower_bound": lower_b,
+                        "upper_bound": upper_b,
+                        "outlier_count": o_cnt,
+                        "outlier_pct": o_pct,
+                        "sample_outliers": [float(v) for v in outliers.head(25)],
+                    })
+                    if o_cnt >= 1 and (o_pct >= 2.0 or o_cnt >= 2):
                         insights.append(
                             AnalyticsInsightItem(
                                 id=f"outlier_{col}",
                                 type="outlier",
                                 title=f"Significant Outlier Concentration: {col}",
-                                statement=f"Found {o_cnt:,} statistical outliers ({o_pct:.1f}%) in '{col}' exceeding 1.5x IQR boundaries (limits: [{q25 - 1.5*iqr:.1f}, {q75 + 1.5*iqr:.1f}]).",
+                                statement=f"Found {o_cnt:,} statistical outliers ({o_pct:.1f}%) in '{col}' exceeding 1.5x IQR boundaries (limits: [{lower_b:.2f}, {upper_b:.2f}]).",
                                 metric=f"{o_pct:.1f}% Outliers",
-                                columns_involved=[col],
+                                columns_involved=[str(col)],
                                 confidence="High",
-                                severity="Warning" if o_pct > 8 else "Informational",
-                                limitations="Outliers may represent high-value signals rather than measurement noise.",
+                                severity="Warning" if o_pct >= 8.0 else "Informational",
+                                observations_used=len(s_num),
+                                calculation_method=f"Tukey 1.5x IQR boundary detection on valid numeric observations (n={len(s_num):,})",
+                                limitations="Outliers may represent genuine high-value signals rather than measurement noise.",
+                                next_step="Examine sample outlier records with business stakeholders to verify if legitimate.",
                             )
                         )
+
+        # 6. Distribution Skewness
+        for col in all_numeric:
+            if is_identifier(col, df[col]):
+                continue
+            s_num = pd.to_numeric(df[col], errors="coerce").dropna()
+            if len(s_num) >= 15:
+                skew_val = float(s_num.skew())
+                if not math.isnan(skew_val) and abs(skew_val) >= 1.5:
+                    insights.append(
+                        AnalyticsInsightItem(
+                            id=f"dist_skew_{col}",
+                            type="distribution",
+                            title=f"Significant Distribution Skewness: {col}",
+                            statement=f"Column '{col}' exhibits pronounced {'positive (right-tailed)' if skew_val > 0 else 'negative (left-tailed)'} skewness (skew = {skew_val:.2f}). Parametric models assuming normal distribution may require transformations.",
+                            metric=f"Skew = {skew_val:.2f}",
+                            columns_involved=[str(col)],
+                            confidence="High",
+                            severity="Informational",
+                            observations_used=len(s_num),
+                            calculation_method=f"Sample skewness moment calculation on valid observations (n={len(s_num):,})",
+                            limitations="Skewness reflects asymmetry of the distribution relative to normal curve.",
+                            next_step="Consider log-transformation, Box-Cox, or non-parametric algorithms when modeling.",
+                        )
+                    )
+
+        # 7. Trend Insight (if date column present)
+        date_cols = [c for c in df.columns if cls._classify_column_role(df[c], str(c)) == "date"]
+        if date_cols and valid_numeric_for_corr:
+            d_col = date_cols[0]
+            m_col = valid_numeric_for_corr[0]
+            try:
+                temp_df = df[[d_col, m_col]].dropna().copy()
+                temp_df["dt"] = pd.to_datetime(temp_df[d_col], errors="coerce")
+                temp_df = temp_df.dropna(subset=["dt"]).sort_values("dt")
+                if len(temp_df) >= 10:
+                    midpoint = len(temp_df) // 2
+                    first_mean = float(temp_df.iloc[:midpoint][m_col].mean())
+                    second_mean = float(temp_df.iloc[midpoint:][m_col].mean())
+                    if first_mean != 0:
+                        change_pct = ((second_mean - first_mean) / abs(first_mean)) * 100
+                        if abs(change_pct) >= 20.0:
+                            direction = "increase" if change_pct > 0 else "decrease"
+                            insights.append(
+                                AnalyticsInsightItem(
+                                    id=f"trend_{m_col}_{d_col}",
+                                    type="trend",
+                                    title=f"Temporal Shift: {m_col}",
+                                    statement=f"Average '{m_col}' exhibited a {abs(change_pct):.1f}% {direction} from earlier to later periods recorded in '{d_col}' (first half mean: {first_mean:.2f}, second half mean: {second_mean:.2f}).",
+                                    metric=f"{change_pct:+.1f}% Shift",
+                                    columns_involved=[m_col, d_col],
+                                    confidence="Moderate",
+                                    severity="Informational",
+                                    observations_used=len(temp_df),
+                                    calculation_method=f"Chronological split-period mean comparison on sorted '{d_col}' observations (n={len(temp_df):,})",
+                                    limitations="Trend analysis represents split period historical shift; does not forecast future trajectory.",
+                                    next_step="Conduct formal time-series decomposition (trend, seasonality, noise) for deeper modeling.",
+                                )
+                            )
+            except Exception:
+                pass
 
         # Fallback informative insight if dataset is pristine
         if not insights:
             insights.append(
                 AnalyticsInsightItem(
                     id="clean_data_notice",
-                    type="concentration",
+                    type="data_quality",
                     title="High Data Stability",
                     statement=f"Dataset contains {total_rows:,} verified rows with uniform distribution and zero high-severity anomalies detected.",
                     metric="100% Balanced",
                     columns_involved=[],
                     confidence="High",
                     severity="Informational",
-                    limitations="Standard rule thresholds applied.",
+                    observations_used=total_rows,
+                    calculation_method="Multi-attribute rule-based heuristic scan across all features",
+                    limitations="Standard statistical rule thresholds applied.",
+                    next_step="Dataset is structurally sound and verified for exploratory or predictive modeling.",
                 )
             )
+
+        # Deduplicate insights strictly
+        seen_insight_keys = set()
+        deduped_insights = []
+        for ins in insights:
+            sev = ins.severity.capitalize()
+            if sev not in ("Critical", "Warning", "Informational"):
+                sev = "Informational"
+            ins.severity = sev
+
+            key = (ins.type, tuple(sorted(ins.columns_involved)), ins.title)
+            if key not in seen_insight_keys:
+                seen_insight_keys.add(key)
+                deduped_insights.append(ins)
+
+        # Severity counts
+        crit_count = sum(1 for i in deduped_insights if i.severity == "Critical")
+        warn_count = sum(1 for i in deduped_insights if i.severity == "Warning")
+        info_count = sum(1 for i in deduped_insights if i.severity == "Informational")
+
+        # Type counts
+        type_labels = {
+            "missing_values": "Missing Values",
+            "duplicate_columns": "Duplicate / Redundant Columns",
+            "correlation": "Correlation",
+            "trend": "Trend",
+            "outlier": "Anomaly / Outlier",
+            "distribution": "Distribution",
+            "concentration": "Category Concentration",
+            "data_quality": "General Data Quality",
+        }
+        type_colors = {
+            "missing_values": "#EF4444",
+            "duplicate_columns": "#E9BD62",
+            "correlation": "#38A995",
+            "trend": "#4778E8",
+            "outlier": "#F2A18D",
+            "distribution": "#06B6D4",
+            "concentration": "#8B7CE8",
+            "data_quality": "#9BA6B8",
+        }
+        type_counts: Dict[str, int] = {}
+        for ins in deduped_insights:
+            type_counts[ins.type] = type_counts.get(ins.type, 0) + 1
+
+        type_chart_points = []
+        for t_key, count in type_counts.items():
+            lbl = type_labels.get(t_key, t_key.replace("_", " ").title())
+            type_chart_points.append({
+                "label": lbl,
+                "value": count,
+                "color": type_colors.get(t_key, "#4778E8"),
+                "x": lbl,
+                "y": count,
+            })
+        type_chart_points.sort(key=lambda x: x["value"], reverse=True)
+
+        # Missing values chart
+        missing_stats.sort(key=lambda x: x[2], reverse=True)
+        missing_chart_points = []
+        for col_name, n_cnt, n_pct in missing_stats[:15]:
+            missing_chart_points.append({
+                "label": col_name,
+                "value": round(n_pct, 2),
+                "count": n_cnt,
+                "total": total_rows,
+                "color": "#EF4444" if n_pct >= 50.0 else "#F59E0B" if n_pct >= 10.0 else "#38A995",
+                "x": col_name,
+                "y": round(n_pct, 2),
+            })
+
+        # Outlier Boxplot data
+        boxplot_items = []
+        for stat in outlier_feature_stats[:8]:
+            boxplot_items.append({
+                "category": stat["col"],
+                "min_val": round(stat["min_val"], 2),
+                "q1": round(stat["q1"], 2),
+                "median": round(stat["median"], 2),
+                "q3": round(stat["q3"], 2),
+                "max_val": round(stat["max_val"], 2),
+                "lower_bound": round(stat["lower_bound"], 2),
+                "upper_bound": round(stat["upper_bound"], 2),
+                "outliers": [round(float(o), 2) for o in stat["sample_outliers"]],
+                "outlier_count": stat["outlier_count"],
+                "outlier_pct": round(stat["outlier_pct"], 2),
+            })
+
+        # Correlation Heatmap data
+        corr_matrix_data: Dict[str, Any] = {
+            "chart_type": "heatmap",
+            "title": "Numeric Correlation Matrix (Pearson r)",
+            "categories": [],
+            "matrix": [],
+            "causal_caveat": "High correlation indicates linear co-movement only; it does NOT establish causal relationship.",
+        }
+        if len(valid_numeric_for_corr) >= 2:
+            top_corr_cols = valid_numeric_for_corr[:10]
+            corr_sub = df[top_corr_cols].apply(pd.to_numeric, errors="coerce").corr().fillna(0)
+            corr_matrix_data["categories"] = top_corr_cols
+            corr_matrix_data["matrix"] = [
+                [round(float(corr_sub.loc[r_c, c_c]), 2) for c_c in top_corr_cols]
+                for r_c in top_corr_cols
+            ]
+
+        # Numeric Distribution Histogram (precompute top numeric columns for switching)
+        num_dist_cols_data: Dict[str, List[Dict[str, Any]]] = {}
+        for num_col in valid_numeric_for_corr[:5]:
+            s_clean = pd.to_numeric(df[num_col], errors="coerce").dropna()
+            if len(s_clean) > 0:
+                counts, bin_edges = np.histogram(s_clean, bins=min(10, max(4, len(s_clean) // 5)))
+                bins_list = []
+                for b_i in range(len(counts)):
+                    b_lbl = f"{bin_edges[b_i]:.1f} - {bin_edges[b_i+1]:.1f}"
+                    bins_list.append({
+                        "label": b_lbl,
+                        "value": int(counts[b_i]),
+                        "color": "#38A995",
+                        "x": b_lbl,
+                        "y": int(counts[b_i]),
+                    })
+                num_dist_cols_data[num_col] = bins_list
+
+        primary_num_col = valid_numeric_for_corr[0] if valid_numeric_for_corr else None
+        num_dist_data: Dict[str, Any] = {
+            "chart_type": "histogram",
+            "title": f"Numeric Distribution: {primary_num_col}" if primary_num_col else "Numeric Distribution",
+            "x_axis_label": primary_num_col or "Value Range",
+            "y_axis_label": "Frequency (Count)",
+            "available_columns": valid_numeric_for_corr[:5],
+            "column": primary_num_col,
+            "data_points": num_dist_cols_data.get(primary_num_col, []) if primary_num_col else [],
+            "columns_data": num_dist_cols_data,
+        }
+
+        # Category Distribution (precompute top categorical columns for switching)
+        non_id_cats = [c for c in all_categorical if not is_identifier(c, df[c])]
+        cat_dist_cols_data: Dict[str, List[Dict[str, Any]]] = {}
+        for cat_col in non_id_cats[:5]:
+            vc = df[cat_col].dropna().value_counts()
+            top_vc = vc.head(7)
+            other_cnt = int(vc.iloc[7:].sum()) if len(vc) > 7 else 0
+            points = []
+            for cat_name, cnt in top_vc.items():
+                cat_pct = (cnt / total_rows) * 100 if total_rows > 0 else 0
+                points.append({
+                    "label": str(cat_name),
+                    "value": int(cnt),
+                    "pct": round(cat_pct, 1),
+                    "color": "#8B7CE8",
+                    "x": str(cat_name),
+                    "y": int(cnt),
+                })
+            if other_cnt > 0:
+                points.append({
+                    "label": "Other (Combined)",
+                    "value": other_cnt,
+                    "pct": round((other_cnt / total_rows) * 100, 1),
+                    "color": "#9BA6B8",
+                    "x": "Other (Combined)",
+                    "y": other_cnt,
+                })
+            cat_dist_cols_data[cat_col] = points
+
+        primary_cat_col = non_id_cats[0] if non_id_cats else None
+        cat_dist_data: Dict[str, Any] = {
+            "chart_type": "bar",
+            "title": f"Category Distribution: {primary_cat_col}" if primary_cat_col else "Category Distribution",
+            "x_axis_label": primary_cat_col or "Category",
+            "y_axis_label": "Record Count",
+            "available_columns": non_id_cats[:5],
+            "column": primary_cat_col,
+            "data_points": cat_dist_cols_data.get(primary_cat_col, []) if primary_cat_col else [],
+            "columns_data": cat_dist_cols_data,
+        }
+
+        charts_data = {
+            "severity_distribution": {
+                "chart_type": "donut",
+                "title": "Insight Severity Distribution",
+                "data_points": [
+                    {"label": "Critical", "value": crit_count, "color": "#EF4444", "x": "Critical", "y": crit_count},
+                    {"label": "Warning", "value": warn_count, "color": "#F59E0B", "x": "Warning", "y": warn_count},
+                    {"label": "Informational", "value": info_count, "color": "#4778E8", "x": "Informational", "y": info_count},
+                ],
+            },
+            "type_distribution": {
+                "chart_type": "bar",
+                "title": "Insights by Classification Type",
+                "x_axis_label": "Classification Type",
+                "y_axis_label": "Insight Count",
+                "data_points": type_chart_points,
+            },
+            "missing_values": {
+                "chart_type": "bar",
+                "title": f"Missing Values by Column (Total Rows: {total_rows:,})",
+                "x_axis_label": "Column",
+                "y_axis_label": "Missing %",
+                "total_rows": total_rows,
+                "columns_with_missing": len(missing_stats),
+                "data_points": missing_chart_points,
+            },
+            "outlier_analysis": {
+                "chart_type": "boxplot",
+                "title": "Outlier & Quartile Distributions (Tukey 1.5x IQR)",
+                "x_axis_label": "Feature",
+                "y_axis_label": "Measurement Scale",
+                "boxplot_data": boxplot_items,
+            },
+            "correlation_heatmap": corr_matrix_data,
+            "numeric_distribution": num_dist_data,
+            "category_distribution": cat_dist_data,
+        }
 
         return AnalyticsInsightsResponse(
             dataset_id=dataset.id,
             dataset_name=dataset.original_filename or dataset.filename,
-            insights=insights,
+            version=actual_version,
+            total_rows=total_rows,
+            total_columns=total_cols,
+            insights=deduped_insights,
+            charts_data=charts_data,
         )
 
     @classmethod

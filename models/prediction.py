@@ -135,6 +135,8 @@ class PredictionPoint:
     upper_bound: Optional[float] = None
     actual_value: Optional[float] = None
     confidence_level: float = 0.95
+    absolute_error: Optional[float] = None
+    percentage_error: Optional[float] = None
 
 
 @dataclass
@@ -161,12 +163,13 @@ class PredictionResult:
     model_results: List[ModelCandidateResult]
     best_metrics: ModelEvaluationMetrics
     predictions: List[PredictionPoint]
-    feature_importance: List[FeatureImportanceItem]
-    features_used: List[str]
-    features_excluded: Dict[str, str]  # feature -> reason
-    uncertainty_method: str
-    explanation: str
-    limitations: List[str]
+    validation_predictions: List[PredictionPoint] = field(default_factory=list)
+    feature_importance: List[FeatureImportanceItem] = field(default_factory=list)
+    features_used: List[str] = field(default_factory=list)
+    features_excluded: Dict[str, str] = field(default_factory=dict)  # feature -> reason
+    uncertainty_method: str = "None"
+    explanation: str = ""
+    limitations: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
     train_rows: int = 0

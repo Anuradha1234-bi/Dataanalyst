@@ -52,12 +52,21 @@ class ForecastingEngine:
         )
 
         n_total = len(df_ts)
+        if n_total < 4:
+            raise ValueError(f"Insufficient chronological observations for forecasting split ({n_total} records found, minimum 4 required).")
         n_val = max(2, int(n_total * test_size))
+        if n_total - n_val < 2:
+            n_val = max(1, n_total - 2)
         n_train = n_total - n_val
 
-        # Chronological Split (Oldest 80% train, Latest 20% validation)
+        # Chronological Split (Oldest train, Latest validation)
         train_df = df_ts.iloc[:n_train]
         val_df = df_ts.iloc[n_train:]
+
+        val_dates: List[str] = [
+            d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)
+            for d in val_df["_parsed_date"]
+        ]
 
         y_train = train_df[target_col].values.astype(float)
         y_val_true = val_df[target_col].values.astype(float)
@@ -310,4 +319,5 @@ class ForecastingEngine:
             best_val_preds,
             future_dates,
             best_estimator,
+            val_dates,
         )

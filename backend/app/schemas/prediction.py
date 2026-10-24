@@ -120,6 +120,8 @@ class PredictionPointItem(BaseModel):
     lower_bound: Optional[float] = None
     upper_bound: Optional[float] = None
     confidence_level: Optional[float] = 0.95
+    absolute_error: Optional[float] = None
+    percentage_error: Optional[float] = None
 
 
 class FeatureImportanceResponseItem(BaseModel):
@@ -148,6 +150,7 @@ class PredictionRunDetailResponse(BaseModel):
     metrics: Dict[str, Any]
     model_comparison: List[ModelCandidateMetricItem] = Field(default_factory=list)
     predictions: List[PredictionPointItem] = Field(default_factory=list)
+    validation_predictions: List[PredictionPointItem] = Field(default_factory=list)
     feature_importance: List[FeatureImportanceResponseItem] = Field(default_factory=list)
     features_used: List[str] = Field(default_factory=list)
     features_excluded: Dict[str, str] = Field(default_factory=dict)

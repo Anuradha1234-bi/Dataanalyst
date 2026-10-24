@@ -120,8 +120,41 @@ def compute_aggregation(
                 "evidence": {"value": val, "aggregation": "count", "column": "all_rows"},
                 "warnings": warnings,
             }
-        # Do not silently fall back to the first numeric column
         num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+        if num_cols and agg_clean in ("mean", "median", "sum", "std", "min", "max"):
+            stats_rows = []
+            for c in num_cols:
+                s = pd.to_numeric(df[c], errors="coerce").dropna()
+                if not s.empty:
+                    if agg_clean in ("mean", "avg"):
+                        val = float(s.mean())
+                    elif agg_clean == "median":
+                        val = float(s.median())
+                    elif agg_clean in ("std", "stdev"):
+                        val = float(s.std()) if len(s) > 1 else 0.0
+                    elif agg_clean == "min":
+                        val = float(s.min())
+                    elif agg_clean == "max":
+                        val = float(s.max())
+                    elif agg_clean == "sum":
+                        val = float(s.sum())
+                    else:
+                        val = 0.0
+                    stats_rows.append({"Feature": c, f"{agg_clean.title()}": round(val, 2)})
+            res_df = pd.DataFrame(stats_rows)
+            return {
+                "result_type": "table",
+                "data": res_df,
+                "columns": list(res_df.columns),
+                "row_count": len(res_df),
+                "evidence": {
+                    "aggregation": agg_clean,
+                    "features": num_cols,
+                    "computed_values": stats_rows,
+                },
+                "warnings": warnings,
+            }
+
         return {
             "result_type": "empty",
             "data": None,
@@ -136,8 +169,27 @@ def compute_aggregation(
         }
 
     series = df[column]
-    if agg_clean in ("mean", "median", "sum", "std", "min", "max") and not pd.api.types.is_numeric_dtype(series):
-        series = pd.to_numeric(series, errors="coerce")
+    if agg_clean in ("mean", "median", "sum", "std"):
+        if not pd.api.types.is_numeric_dtype(series):
+            converted = pd.to_numeric(series, errors="coerce")
+            if converted.dropna().empty and not series.dropna().empty:
+                return {
+                    "result_type": "error",
+                    "data": None,
+                    "columns": [column],
+                    "row_count": 0,
+                    "evidence": {
+                        "error": f"Cannot compute numeric {agg_clean} on categorical/text column '{column}'. Mean and mathematical averages require a numeric column.",
+                        "column": column,
+                        "data_type": str(df[column].dtype),
+                    },
+                    "warnings": [f"Categorical column '{column}' cannot be used for numeric aggregation '{agg_clean}'."],
+                }
+            series = converted
+    elif agg_clean in ("min", "max") and not pd.api.types.is_numeric_dtype(series):
+        converted = pd.to_numeric(series, errors="coerce")
+        if not converted.dropna().empty and converted.count() >= series.count() * 0.8:
+            series = converted
 
     series_valid = series.dropna()
     if series_valid.empty:
@@ -152,16 +204,29 @@ def compute_aggregation(
 
     if agg_clean == "mean":
         val = float(series_valid.mean())
+    record_ext = None
+    rec_index = None
+
+    if agg_clean == "min":
+        val = float(series_valid.min()) if pd.api.types.is_numeric_dtype(series_valid) else series_valid.min()
+        try:
+            rec_index = series_valid.idxmin()
+            record_ext = {str(k): (round(float(v), 4) if isinstance(v, (float, np.floating)) else (int(v) if isinstance(v, (int, np.integer)) else str(v))) for k, v in df.loc[rec_index].to_dict().items()}
+        except Exception:
+            pass
+    elif agg_clean == "max":
+        val = float(series_valid.max()) if pd.api.types.is_numeric_dtype(series_valid) else series_valid.max()
+        try:
+            rec_index = series_valid.idxmax()
+            record_ext = {str(k): (round(float(v), 4) if isinstance(v, (float, np.floating)) else (int(v) if isinstance(v, (int, np.integer)) else str(v))) for k, v in df.loc[rec_index].to_dict().items()}
+        except Exception:
+            pass
     elif agg_clean == "median":
         val = float(series_valid.median())
     elif agg_clean == "sum":
         val = float(series_valid.sum())
-    elif agg_clean == "min":
-        val = float(series_valid.min()) if pd.api.types.is_numeric_dtype(series_valid) else series_valid.min()
-    elif agg_clean == "max":
-        val = float(series_valid.max()) if pd.api.types.is_numeric_dtype(series_valid) else series_valid.max()
     elif agg_clean == "std":
-        val = float(series_valid.std())
+        val = float(series_valid.std(ddof=1))
     elif agg_clean == "nunique":
         val = int(series_valid.nunique())
     elif agg_clean == "count":
@@ -181,15 +246,30 @@ def compute_aggregation(
         "count_valid": int(len(series_valid)),
         "count_null": int(df[column].isna().sum()),
     }
+    if agg_clean == "std":
+        evidence["ddof"] = 1
+        evidence["degrees_of_freedom"] = int(len(series_valid) - 1)
+        evidence["standard_deviation_type"] = "sample (unbiased, ddof=1)"
+    if record_ext is not None:
+        evidence["record"] = record_ext
+        try:
+            evidence["record_index"] = int(rec_index) + 1 if isinstance(rec_index, (int, np.integer)) else str(rec_index)
+        except Exception:
+            evidence["record_index"] = str(rec_index)
 
-    # Also build a single-row 1-column or 2-column DataFrame for uniform table rendering
-    res_df = pd.DataFrame([{f"{agg_clean}_{column}": val}])
+    # Build DataFrame: if extreme record exists, render full record; otherwise single-row value
+    if record_ext is not None:
+        res_df = pd.DataFrame([record_ext])
+        columns_out = list(res_df.columns)
+    else:
+        res_df = pd.DataFrame([{f"{agg_clean}_{column}": val}])
+        columns_out = [f"{agg_clean}_{column}"]
 
     return {
-        "result_type": "scalar",
-        "data": val,
+        "result_type": "table" if record_ext is not None else "scalar",
+        "data": res_df if record_ext is not None else val,
         "table_view": res_df,
-        "columns": [f"{agg_clean}_{column}"],
+        "columns": columns_out,
         "row_count": 1,
         "evidence": evidence,
         "warnings": warnings,

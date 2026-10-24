@@ -2,6 +2,7 @@
 
 import io
 import json
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -138,12 +139,33 @@ class PredictionService:
             for dc in date_candidates_raw
         ]
 
-        # Resolve selected target and date
+        # Resolve selected target and date according to requested mode
         resolved_target = request.target_column
+        if resolved_target and resolved_target not in df.columns:
+            resolved_target = None
+
+        req_mode = (request.mode or "auto").lower()
+
         if not resolved_target and target_candidates:
-            resolved_target = target_candidates[0].column
+            if req_mode == "regression":
+                reg_cand = next((tc for tc in target_candidates if "regression" in str(tc.problem_type).lower()), None)
+                resolved_target = reg_cand.column if reg_cand else target_candidates[0].column
+            elif req_mode == "classification":
+                # Prioritize classification candidate with sufficient class samples (higher score)
+                cls_cand = next((tc for tc in target_candidates if "classification" in str(tc.problem_type).lower() and tc.score >= 0.3), None)
+                if not cls_cand:
+                    cls_cand = next((tc for tc in target_candidates if "classification" in str(tc.problem_type).lower()), None)
+                resolved_target = cls_cand.column if cls_cand else target_candidates[0].column
+            elif req_mode == "forecasting":
+                fc_cand = next((tc for tc in target_candidates if "regression" in str(tc.problem_type).lower()), None)
+                resolved_target = fc_cand.column if fc_cand else target_candidates[0].column
+            else:
+                resolved_target = target_candidates[0].column
 
         resolved_date = request.date_column
+        if resolved_date and resolved_date not in df.columns:
+            resolved_date = None
+
         if not resolved_date and date_candidates:
             resolved_date = date_candidates[0].column
 
@@ -152,7 +174,7 @@ class PredictionService:
             df=df,
             target_col=resolved_target,
             date_col=resolved_date,
-            requested_mode=request.mode or "auto",
+            requested_mode=req_mode,
         )
 
         suitability = ProblemDetector.check_dataset_suitability(
@@ -171,6 +193,9 @@ class PredictionService:
             problem_type=problem_type,
         )
 
+        from prediction.leakage_detector import extract_base_column_name
+        from analysis.anomaly_utils import AnomalyUtils
+
         # Build column profile items
         columns_summary: List[ColumnSummaryItem] = []
         for col in df.columns:
@@ -179,19 +204,51 @@ class PredictionService:
             missing_pct = round((missing_count / max(1, len(df))) * 100.0, 2)
             unique_count = int(series.nunique(dropna=True))
 
+            col_str = str(col)
+            col_lower = col_str.strip().lower()
+            col_base = extract_base_column_name(col_str)
+            col_base_lower = col_base.lower()
+
             # Role detection
+            is_id, id_reason = AnomalyUtils.is_id_or_index_column(series, col_str)
+            is_name_col = any(
+                p in [col_lower, col_base_lower]
+                or col_lower.endswith(f"_{p}") or col_base_lower.endswith(f"_{p}")
+                or col_lower.startswith(f"{p}_") or col_base_lower.startswith(f"{p}_")
+                for p in ["customer_name", "user_name", "client_name", "username", "name", "full_name", "first_name", "last_name", "email", "e_mail", "mail"]
+            )
+            is_duplicate_col = col_base != col_str and col_base in df.columns
+            leak_risk = leakage_report.flagged_features.get(col_str)
+
             if col == resolved_target:
                 role = "target"
             elif col == resolved_date:
                 role = "datetime"
+            elif leak_risk and ("duplicate of target" in leak_risk.lower() or "exact duplicate of target" in leak_risk.lower()):
+                role = "leakage"
+            elif is_duplicate_col:
+                role = "duplicate"
+            elif is_name_col or is_id:
+                has_semantic = any(kw in col_lower or kw in col_base_lower for kw in [
+                    "store", "dept", "department", "category", "class", "tier", "type",
+                    "branch", "zone", "region", "segment", "group"
+                ])
+                non_null = series.dropna()
+                is_low_cardinality = len(non_null) > 0 and (non_null.nunique() / len(non_null) <= 0.4)
+                if has_semantic and is_low_cardinality:
+                    role = "categorical" if not pd.api.types.is_numeric_dtype(series) else "numeric"
+                else:
+                    role = "identifier"
             elif unique_count <= 1:
                 role = "constant"
             elif pd.api.types.is_numeric_dtype(series):
                 role = "numeric"
             elif (
                 pd.api.types.is_datetime64_any_dtype(series)
-                or "date" in str(col).lower()
-                or "time" in str(col).lower()
+                or "date" in col_lower
+                or "time" in col_lower
+                or "date" in col_base_lower
+                or "time" in col_base_lower
             ):
                 role = "datetime"
             else:
@@ -203,8 +260,6 @@ class PredictionService:
                 round(float(s), 4) if isinstance(s, (float, np.floating)) else str(s)
                 for s in raw_samples
             ]
-
-            leak_risk = leakage_report.flagged_features.get(str(col))
 
             columns_summary.append(
                 ColumnSummaryItem(
@@ -271,6 +326,10 @@ class PredictionService:
             )
 
         date_col = request.date_column
+        if not date_col:
+            detected_dates = TargetDetector.detect_date_columns(df_work)
+            if detected_dates:
+                date_col = detected_dates[0].column
         if date_col and date_col not in df_work.columns:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -328,6 +387,7 @@ class PredictionService:
         task_str = "regression"
         selection_metric = "Lowest Validation MAE"
         prediction_points: List[PredictionPointItem] = []
+        validation_points: List[PredictionPointItem] = []
         feature_importance_items: List[FeatureImportanceResponseItem] = []
         candidate_metrics_list: List[ModelCandidateMetricItem] = []
         pipeline_artifact: Dict[str, Any] = {}
@@ -346,19 +406,33 @@ class PredictionService:
                 selection_metric = "Lowest Validation MAE"
                 forecast_horizon_val = request.forecast_horizon
 
-                candidates, best_id, future_preds, y_val_t, y_val_p, future_dates, best_est = (
-                    ForecastingEngine.train_and_forecast(
-                        df=df_work,
-                        date_col=date_col,
-                        target_col=target_col,
-                        horizon=request.forecast_horizon,
-                        test_size=test_size,
-                        preferred_model_id=candidate_model_id,
-                    )
+                fc_res = ForecastingEngine.train_and_forecast(
+                    df=df_work,
+                    date_col=date_col,
+                    target_col=target_col,
+                    horizon=request.forecast_horizon,
+                    test_size=test_size,
+                    preferred_model_id=candidate_model_id,
                 )
+                candidates, best_id, future_preds, y_val_t, y_val_p, future_dates, best_est = fc_res[:7]
+                val_dates = fc_res[7] if len(fc_res) > 7 else [f"val_{i+1}" for i in range(len(y_val_t))]
 
                 train_rows = len(df_work) - len(y_val_t)
                 validation_rows = len(y_val_t)
+
+                validation_points = []
+                for d, yt, yp in zip(val_dates, y_val_t, y_val_p):
+                    abs_err = round(float(abs(yt - yp)), 4)
+                    pct_err = round(float(abs_err / abs(yt) * 100.0), 2) if abs(yt) > 1e-9 else None
+                    validation_points.append(
+                        PredictionPointItem(
+                            index_or_date=str(d),
+                            actual_value=round(float(yt), 4),
+                            predicted_value=round(float(yp), 4),
+                            absolute_error=abs_err,
+                            percentage_error=pct_err,
+                        )
+                    )
 
                 lowers, uppers, uncert_desc = UncertaintyService.calculate_regression_intervals(
                     y_val_true=y_val_t,
@@ -471,9 +545,12 @@ class PredictionService:
                         actual_value=round(float(a), 4),
                         lower_bound=round(float(l), 4) if l is not None else None,
                         upper_bound=round(float(u), 4) if u is not None else None,
+                        absolute_error=round(float(abs(a - p)), 4),
+                        percentage_error=round(float(abs(a - p) / abs(a) * 100.0), 2) if abs(a) > 1e-9 else None,
                     )
                     for i, (p, a, l, u) in enumerate(zip(best_preds, y_val, lowers, uppers))
                 ]
+                validation_points = list(prediction_points)
 
                 raw_imp = FeatureImportanceService.extract_importance(best_est, feat_names, max_features=10)
                 feature_importance_items = [
@@ -522,10 +599,14 @@ class PredictionService:
                     "model_name": best_candidate_name,
                     "target_column": target_col,
                     "features_used": features_used,
+                    "ordered_predictors": num_feats + cat_feats,
                     "numeric_features": num_feats,
                     "categorical_features": cat_feats,
                     "preprocessor": preprocessor,
                     "model": best_est,
+                    "dataset_id": dataset.id,
+                    "dataset_name": dataset.filename,
+                    "created_at": datetime.utcnow().isoformat(),
                 }
 
             else:
@@ -561,6 +642,7 @@ class PredictionService:
                     )
                     for i, (pl, al) in enumerate(zip(pred_labels, actual_labels))
                 ]
+                validation_points = list(prediction_points)
 
                 raw_imp = FeatureImportanceService.extract_importance(best_est, feat_names, max_features=10)
                 feature_importance_items = [
@@ -609,11 +691,15 @@ class PredictionService:
                     "model_name": best_candidate_name,
                     "target_column": target_col,
                     "features_used": features_used,
+                    "ordered_predictors": num_feats + cat_feats,
                     "numeric_features": num_feats,
                     "categorical_features": cat_feats,
                     "preprocessor": preprocessor,
                     "model": best_est,
                     "label_encoder": le,
+                    "dataset_id": dataset.id,
+                    "dataset_name": dataset.filename,
+                    "created_at": datetime.utcnow().isoformat(),
                 }
 
         except Exception as exc:
@@ -647,6 +733,7 @@ class PredictionService:
             metrics_json=json.dumps(best_metrics_dict),
             model_comparison_json=json.dumps([c.model_dump() for c in candidate_metrics_list]),
             predictions_json=json.dumps([p.model_dump() for p in prediction_points]),
+            validation_predictions_json=json.dumps([p.model_dump() for p in validation_points]),
             feature_importance_json=json.dumps([f.model_dump() for f in feature_importance_items]),
             features_used_json=json.dumps(features_used),
             features_excluded_json=json.dumps(features_excluded),
@@ -678,6 +765,7 @@ class PredictionService:
             metrics=best_metrics_dict,
             model_comparison=candidate_metrics_list,
             predictions=prediction_points,
+            validation_predictions=validation_points,
             feature_importance=feature_importance_items,
             features_used=features_used,
             features_excluded=features_excluded,
@@ -762,6 +850,9 @@ class PredictionService:
         preds_raw = safe_json_load(run.predictions_json, [])
         preds = [PredictionPointItem(**p) for p in preds_raw]
 
+        val_preds_raw = safe_json_load(getattr(run, "validation_predictions_json", None), [])
+        val_preds = [PredictionPointItem(**p) for p in val_preds_raw]
+
         fi_raw = safe_json_load(run.feature_importance_json, [])
         fi = [FeatureImportanceResponseItem(**f) for f in fi_raw]
 
@@ -786,6 +877,7 @@ class PredictionService:
             metrics=metrics,
             model_comparison=model_comp,
             predictions=preds,
+            validation_predictions=val_preds,
             feature_importance=fi,
             features_used=features_used,
             features_excluded=features_excluded,
@@ -825,26 +917,43 @@ class PredictionService:
 
     @classmethod
     def export_predictions_csv(cls, db: Session, user: User, run_id: int) -> Tuple[str, str]:
-        """Export predictions to a CSV string and generate appropriate download filename."""
+        """Export predictions and validation holdout to CSV with explicit record_type labels."""
         detail = cls.get_run_detail(db, user, run_id)
-        if not detail.predictions:
+        if not detail.predictions and not detail.validation_predictions:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="No predictions found in this run.",
             )
 
         rows = []
+        # 1. Validation holdout records (if present)
+        if detail.validation_predictions:
+            for p in detail.validation_predictions:
+                item = {
+                    "record_type": "validation_holdout",
+                    "period_or_index": p.index_or_date,
+                    f"actual_{detail.target_column}": p.actual_value,
+                    f"predicted_{detail.target_column}": p.predicted_value,
+                    "absolute_error": p.absolute_error,
+                    "percentage_error": p.percentage_error,
+                    "lower_bound_95%": None,
+                    "upper_bound_95%": None,
+                }
+                rows.append(item)
+
+        # 2. Future forecast points or inference predictions
+        rec_type = "future_forecast" if detail.task_type == "time_series" else "prediction"
         for p in detail.predictions:
             item = {
+                "record_type": rec_type,
                 "period_or_index": p.index_or_date,
+                f"actual_{detail.target_column}": p.actual_value,
                 f"predicted_{detail.target_column}": p.predicted_value,
+                "absolute_error": p.absolute_error if p.actual_value is not None else None,
+                "percentage_error": p.percentage_error if p.actual_value is not None else None,
+                "lower_bound_95%": p.lower_bound,
+                "upper_bound_95%": p.upper_bound,
             }
-            if p.actual_value is not None:
-                item[f"actual_{detail.target_column}"] = p.actual_value
-            if p.lower_bound is not None:
-                item["lower_bound_95%"] = p.lower_bound
-            if p.upper_bound is not None:
-                item["upper_bound_95%"] = p.upper_bound
             rows.append(item)
 
         pred_df = pd.DataFrame(rows)
@@ -923,27 +1032,63 @@ class PredictionService:
                 f"| {c.model_name} | `{c.status}` | `{primary_val}` | {c.training_time_seconds}s | {star} |"
             )
 
+        sec_idx = 5
+        if d.validation_predictions:
+            lines.extend([
+                "",
+                f"## {sec_idx}. Validation Holdout (Actual vs Predicted)",
+                f"Evaluated on {len(d.validation_predictions)} chronological holdout observations.",
+                "",
+                f"| Date / Step | Actual `{d.target_column}` | Predicted `{d.target_column}` | Absolute Error | Percentage Error (%) |",
+                "| :--- | :--- | :--- | :--- | :--- |",
+            ])
+            for p in d.validation_predictions:
+                act_str = f"{p.actual_value:,.2f}" if isinstance(p.actual_value, (int, float)) else str(p.actual_value)
+                pred_str = f"{p.predicted_value:,.2f}" if isinstance(p.predicted_value, (int, float)) else str(p.predicted_value)
+                abs_str = f"{p.absolute_error:,.2f}" if isinstance(p.absolute_error, (int, float)) else "N/A"
+                pct_str = f"{p.percentage_error:.2f}%" if isinstance(p.percentage_error, (int, float)) else "N/A"
+                lines.append(f"| {p.index_or_date} | `{act_str}` | `{pred_str}` | `{abs_str}` | `{pct_str}` |")
+            sec_idx += 1
+
+        if d.task_type == "time_series" and d.predictions:
+            lines.extend([
+                "",
+                f"## {sec_idx}. Future Horizon Projections",
+                f"Recursive multi-step forward projections ({len(d.predictions)} horizon steps). Note: Real-world accuracy cannot be verified until future data is recorded.",
+                "",
+                f"| Forecast Date | Predicted `{d.target_column}` | Lower Bound (95%) | Upper Bound (95%) |",
+                "| :--- | :--- | :--- | :--- |",
+            ])
+            for p in d.predictions:
+                pred_str = f"{p.predicted_value:,.2f}" if isinstance(p.predicted_value, (int, float)) else str(p.predicted_value)
+                low_str = f"{p.lower_bound:,.2f}" if isinstance(p.lower_bound, (int, float)) else "N/A"
+                up_str = f"{p.upper_bound:,.2f}" if isinstance(p.upper_bound, (int, float)) else "N/A"
+                lines.append(f"| {p.index_or_date} | `{pred_str}` | `{low_str}` | `{up_str}` |")
+            sec_idx += 1
+
         if d.feature_importance:
             lines.extend([
                 "",
-                "## 5. Feature Importance Rankings",
+                f"## {sec_idx}. Feature Importance Rankings",
                 "| Feature | Relative Weight | Contribution % |",
                 "| :--- | :--- | :--- |",
             ])
             for f in d.feature_importance:
                 lines.append(f"| `{f.feature}` | {f.importance_score} | {f.percentage}% |")
+            sec_idx += 1
 
         if d.explanation:
             lines.extend([
                 "",
-                "## 6. Model Interpretation",
+                f"## {sec_idx}. Model Interpretation",
                 d.explanation,
             ])
+            sec_idx += 1
 
         if d.limitations:
             lines.extend([
                 "",
-                "## 7. Assumptions & Limitations",
+                f"## {sec_idx}. Assumptions & Limitations",
             ])
             for lim in d.limitations:
                 lines.append(f"- {lim}")
@@ -1006,6 +1151,11 @@ class PredictionService:
 
         task_type = artifact.get("task_type", run.task_type)
         features_used = artifact.get("features_used", [])
+        num_feats = artifact.get("numeric_features", [])
+        cat_feats = artifact.get("categorical_features", [])
+        ordered_predictors = artifact.get("ordered_predictors") or (num_feats + cat_feats)
+        if not ordered_predictors:
+            ordered_predictors = features_used
 
         if task_type == "forecasting":
             raise HTTPException(
@@ -1013,27 +1163,130 @@ class PredictionService:
                 detail="Time-series forecasting models project future horizon points from historical data. Use the horizon parameter rather than uploading separate batch records.",
             )
 
-        # Check required features
-        missing_features = [f for f in features_used if f not in new_df.columns]
-        if missing_features:
+        from prediction.leakage_detector import extract_base_column_name
+
+        def normalize_column_key(name: str) -> str:
+            """Canonical key for safe, unambiguous semantic matching:
+            strips cleaning/join suffixes, removes spaces, underscores, hyphens, and lowercases.
+            """
+            base = extract_base_column_name(str(name).strip())
+            return re.sub(r"[\s_\-]+", "", base).lower()
+
+        # Map uploaded columns to expected predictors (supports original-schema files without duplicate-column requirements)
+        mapped_df = new_df.copy()
+        existing_cols = list(mapped_df.columns)
+        existing_cols_lower = {c.lower(): c for c in existing_cols}
+        existing_cols_base = {extract_base_column_name(c).lower(): c for c in existing_cols}
+
+        # Build index of normalized keys for incoming columns, checking for ambiguity
+        normalized_existing_map: Dict[str, List[str]] = {}
+        for c in existing_cols:
+            norm_k = normalize_column_key(c)
+            normalized_existing_map.setdefault(norm_k, []).append(c)
+
+        mapped_features: Dict[str, str] = {}
+        missing_features: List[str] = []
+        imputed_features: List[str] = []
+        inference_warnings: List[str] = []
+
+        for req_feat in ordered_predictors:
+            if req_feat in mapped_df.columns:
+                mapped_features[req_feat] = req_feat
+                continue
+
+            req_feat_lower = req_feat.lower()
+            req_feat_base = extract_base_column_name(req_feat)
+            req_feat_base_lower = req_feat_base.lower()
+            req_norm = normalize_column_key(req_feat)
+
+            # 1. Exact case-insensitive match
+            if req_feat_lower in existing_cols_lower:
+                matched_col = existing_cols_lower[req_feat_lower]
+                mapped_df[req_feat] = mapped_df[matched_col]
+                mapped_features[req_feat] = matched_col
+                continue
+
+            # 2. Suffix match: artifact expected "Col_clean_...", uploaded file has "Col"
+            if req_feat_base in mapped_df.columns:
+                matched_col = req_feat_base
+                mapped_df[req_feat] = mapped_df[matched_col]
+                mapped_features[req_feat] = matched_col
+                continue
+            if req_feat_base_lower in existing_cols_lower:
+                matched_col = existing_cols_lower[req_feat_base_lower]
+                mapped_df[req_feat] = mapped_df[matched_col]
+                mapped_features[req_feat] = matched_col
+                continue
+
+            # 3. Base match: artifact expected "Col", uploaded file has "Col_clean_..."
+            if req_feat_lower in existing_cols_base:
+                matched_col = existing_cols_base[req_feat_lower]
+                mapped_df[req_feat] = mapped_df[matched_col]
+                mapped_features[req_feat] = matched_col
+                continue
+
+            # 4. Safe unambiguous normalized match (e.g. "Customer ID" vs "Customer_ID", "Order Amount INR" vs "Order_Amount_INR")
+            candidates = normalized_existing_map.get(req_norm, [])
+            if len(candidates) == 1:
+                matched_col = candidates[0]
+                mapped_df[req_feat] = mapped_df[matched_col]
+                mapped_features[req_feat] = matched_col
+                continue
+
+            missing_features.append(req_feat)
+
+        # Check if safe inference is possible:
+        # If ZERO required predictors were matched from the uploaded file, the file is genuinely incompatible.
+        if len(mapped_features) == 0:
+            avail = list(new_df.columns)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
-                    f"Uploaded dataset is missing required predictor columns used during training: "
-                    f"{', '.join(missing_features[:5])}"
-                    + (f" and {len(missing_features) - 5} more" if len(missing_features) > 5 else "")
+                    f"Uploaded file '{file.filename}' is missing required predictor columns used during training. "
+                    f"None of the required predictor columns were found in the uploaded file. "
+                    f"Required predictors ({len(ordered_predictors)}): {', '.join(ordered_predictors[:6])}"
+                    + (f" and {len(ordered_predictors) - 6} more." if len(ordered_predictors) > 6 else ". ")
+                    + f"Available columns in uploaded file ({len(avail)}): {', '.join(avail[:8])}"
+                    + (f" and {len(avail) - 8} more." if len(avail) > 8 else ".")
+                    + " Please provide a CSV or Excel file containing compatible predictor features."
                 ),
             )
 
         preprocessor = artifact.get("preprocessor")
         model = artifact.get("model")
-        num_feats = artifact.get("numeric_features", [])
-        cat_feats = artifact.get("categorical_features", [])
+
+        # For any missing features, check if the saved preprocessing pipeline supports imputation
+        if missing_features:
+            if preprocessor is None:
+                avail = list(new_df.columns)
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Uploaded file '{file.filename}' is missing required predictor columns: "
+                        f"{', '.join(missing_features)}. The model does not have an automated imputation pipeline. "
+                        f"Available columns: {', '.join(avail)}."
+                    ),
+                )
+
+            # Impute missing features with np.nan and let fitted ColumnTransformer SimpleImputer process them safely
+            for missing_col in missing_features:
+                mapped_df[missing_col] = np.nan
+                imputed_features.append(missing_col)
+
+            inference_warnings.append(
+                f"The following {len(imputed_features)} predictor column(s) were absent from '{file.filename}' "
+                f"and were automatically imputed using training baseline distributions: {', '.join(imputed_features[:6])}"
+                + (f" and {len(imputed_features) - 6} more." if len(imputed_features) > 6 else ".")
+            )
+
         pred_col_name = f"predicted_{run.target_column}"
 
         try:
-            # Transform features using preprocessor fitted ONLY on training data
-            X_input = new_df[num_feats + cat_feats]
+            # Transform features using preprocessor fitted ONLY on training data with safe sanitization
+            from prediction.preprocessing import PreprocessingService
+            # Extract features in exact order saved in the pipeline artifact
+            X_input_raw = mapped_df[num_feats + cat_feats]
+            X_input = PreprocessingService.sanitize_features(X_input_raw, num_feats, cat_feats)
             if preprocessor is not None:
                 X_proc = preprocessor.transform(X_input)
             else:
@@ -1072,7 +1325,7 @@ class PredictionService:
                 target_column=run.target_column,
                 predicted_column_name=pred_col_name,
                 features_used=features_used,
-                warnings=[],
+                warnings=inference_warnings,
             )
 
         except Exception as exc:

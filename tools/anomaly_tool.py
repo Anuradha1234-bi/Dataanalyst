@@ -40,7 +40,7 @@ class AnomalyTool:
     """Detects tabular anomalies using statistical and scikit-learn models."""
 
     ID_REGEX = re.compile(
-        r"^(id|index|row_?num(ber)?|row_?id|record_?id|trans(action)?_?id|order_?id|cust(omer)?_?id|user_?id|account_?id|invoice_?id)$",
+        r"^(id|index|row_?num(ber)?|row_?id|record_?id|trans(action)?_?id|order_?id|cust(omer)?_?id|user_?id|account_?id|invoice_?id|client_?id|patient_?id|employee_?id|member_?id|student_?id|product_?id|item_?id|sku(_?id)?|store_?id|vendor_?id|session_?id|device_?id)$",
         re.IGNORECASE,
     )
 
@@ -58,21 +58,41 @@ class AnomalyTool:
     # =========================================================================
 
     @classmethod
+    def get_column_base_name(cls, col_name: str) -> str:
+        """Strip dataset cleaning, joining, and duplicate numbering suffixes to reveal base semantic feature name."""
+        c = str(col_name).strip()
+        prev = None
+        while c != prev:
+            prev = c
+            c = re.sub(r"\s*\(\d+\)$", "", c).strip()
+            c = re.sub(r"\.\d+$", "", c).strip()
+            c = re.sub(
+                r"(_clean_[a-zA-Z0-9_]+|_cleaned|_clean|_copy|_dup|_duplicate|_left|_right)$",
+                "",
+                c,
+                flags=re.IGNORECASE,
+            ).strip()
+            c = re.sub(r"__\d+$", "", c).strip()
+        return c
+
+    @classmethod
     def is_id_or_index_column(cls, series: pd.Series, col_name: str) -> Tuple[bool, str]:
         """Determine whether a column represents an ID, index, or meaningless sequence."""
         col_clean = str(col_name).strip()
         col_lower = col_clean.lower()
+        col_base = cls.get_column_base_name(col_clean)
+        col_base_lower = col_base.lower()
 
         # 1. Unnamed index columns
-        if col_lower.startswith("unnamed") or col_lower in ("index", "level_0"):
+        if col_lower.startswith("unnamed") or col_lower in ("index", "level_0") or col_base_lower in ("index", "level_0"):
             return True, "Automated or unnamed CSV index column"
 
-        # 2. Obvious ID names
-        if cls.ID_REGEX.match(col_lower):
+        # 2. Obvious ID names (matching original or base name)
+        if cls.ID_REGEX.match(col_lower) or cls.ID_REGEX.match(col_base_lower):
             return True, f"Identified as identifier column by name pattern '{col_name}'"
 
-        if cls.ID_SUFFIX_REGEX.search(col_lower) and not any(
-            val_kw in col_lower for val_kw in ["paid", "valid", "pyramid", "fluid", "solid", "rapid", "grid"]
+        if (cls.ID_SUFFIX_REGEX.search(col_lower) or cls.ID_SUFFIX_REGEX.search(col_base_lower)) and not any(
+            val_kw in col_lower for val_kw in ["paid", "valid", "pyramid", "fluid", "solid", "rapid", "grid", "humid", "lipid", "acid", "hybrid"]
         ):
             # Check cardinality: if high unique ratio, it's an ID
             non_null = series.dropna()
@@ -96,7 +116,7 @@ class AnomalyTool:
         if pd.api.types.is_numeric_dtype(series) and len(non_null) >= 10:
             if non_null.nunique() == len(series) and (non_null == non_null.round()).all():
                 # Check if it has an ID-like name
-                if any(w in col_lower for w in ["num", "no", "code", "key", "ref"]):
+                if any(w in col_lower for w in ["num", "no", "code", "key", "ref"]) or any(w in col_base_lower for w in ["num", "no", "code", "key", "ref"]):
                     return True, "100% unique integer sequence with reference name"
 
         return False, ""
@@ -142,6 +162,81 @@ class AnomalyTool:
         return suitable, excluded_ids, excluded_other
 
     # =========================================================================
+    # FEATURE SUITABILITY, DUPLICATE DETECTION & ID FILTERING
+    # =========================================================================
+
+    @classmethod
+    def are_numeric_columns_exact_duplicates(cls, s1: pd.Series, s2: pd.Series) -> bool:
+        """Compare two numerical series for exact row-aligned equivalence including missing values.
+        
+        Requires identical row lengths, aligned missing value masks, and exactly equal valid values.
+        Does not treat partially matching, merely correlated, or non-identical columns as duplicates.
+        """
+        if len(s1) != len(s2):
+            return False
+        # Align missing values
+        na1 = s1.isna().to_numpy()
+        na2 = s2.isna().to_numpy()
+        if not np.array_equal(na1, na2):
+            return False
+        # If all missing in both series, they are equivalent
+        if np.all(na1):
+            return True
+        # Compare non-missing numeric values strictly
+        try:
+            v1 = pd.to_numeric(s1[~na1], errors="coerce").to_numpy(dtype=float)
+            v2 = pd.to_numeric(s2[~na2], errors="coerce").to_numpy(dtype=float)
+            if len(v1) != len(v2):
+                return False
+            # Check for non-finite values in valid positions
+            fin1 = np.isfinite(v1)
+            fin2 = np.isfinite(v2)
+            if not np.array_equal(fin1, fin2):
+                return False
+            # Compare finite values exactly (robust to floating point precision)
+            return bool(np.allclose(v1[fin1], v2[fin2], rtol=1e-9, atol=1e-12, equal_nan=False))
+        except Exception:
+            return False
+
+    @classmethod
+    def detect_duplicate_numerical_columns(
+        cls, df: pd.DataFrame, columns: Optional[List[str]] = None
+    ) -> Tuple[Dict[str, List[str]], Dict[str, str]]:
+        """Identify exact duplicate numerical columns preserving original column order.
+        
+        Returns:
+            canonical_to_duplicates: Dict[canonical_col_name, list_of_duplicate_col_names]
+            duplicate_to_canonical: Dict[duplicate_col_name, canonical_col_name]
+        """
+        if df is None or df.empty:
+            return {}, {}
+
+        source_cols = columns if columns is not None else list(df.columns)
+        num_cols = [c for c in source_cols if c in df.columns and pd.api.types.is_numeric_dtype(df[c])]
+        canonical_to_duplicates: Dict[str, List[str]] = {}
+        duplicate_to_canonical: Dict[str, str] = {}
+        already_duplicate = set()
+
+        for i in range(len(num_cols)):
+            col_a = num_cols[i]
+            if col_a in already_duplicate:
+                continue
+            s_a = df[col_a]
+            for j in range(i + 1, len(num_cols)):
+                col_b = num_cols[j]
+                if col_b in already_duplicate:
+                    continue
+                s_b = df[col_b]
+                if cls.are_numeric_columns_exact_duplicates(s_a, s_b):
+                    if col_a not in canonical_to_duplicates:
+                        canonical_to_duplicates[col_a] = []
+                    canonical_to_duplicates[col_a].append(col_b)
+                    duplicate_to_canonical[col_b] = col_a
+                    already_duplicate.add(col_b)
+
+        return canonical_to_duplicates, duplicate_to_canonical
+
+    # =========================================================================
     # 1. IQR-BASED OUTLIER DETECTION
     # =========================================================================
 
@@ -159,6 +254,13 @@ class AnomalyTool:
             IQR = Q3 - Q1
             Lower Bound = Q1 - multiplier * IQR
             Upper Bound = Q3 + multiplier * IQR
+        
+        Classification rules:
+            - Lower outlier: value strictly below lower bound (< lower_bound).
+            - Upper outlier: value strictly above upper bound (> upper_bound).
+            - Values exactly on bounds are NOT outliers.
+            - Missing, null, or non-finite values (NaN, +inf, -inf) are NEVER classified as outliers.
+            - Denominator for per-column outlier_pct is the count of valid finite observations evaluated.
         """
         if df is None or df.empty:
             return IQRAnalysisResult(
@@ -170,6 +272,7 @@ class AnomalyTool:
                 outlier_rate=0.0,
                 all_outlier_indices=[],
                 multiplier=multiplier,
+                duplicate_columns={},
             )
 
         # Determine target columns
@@ -179,12 +282,50 @@ class AnomalyTool:
         else:
             target_cols = [c for c in columns if c in df.columns and pd.api.types.is_numeric_dtype(df[c])]
 
+        # Detect duplicate numerical columns among evaluated columns
+        canonical_to_dups, _ = cls.detect_duplicate_numerical_columns(df, columns=target_cols)
+
+        total_rows = len(df)
         column_results: Dict[str, IQROutlierColumnResult] = {}
         all_outlier_indices_set = set()
 
         for col in target_cols:
-            s = df[col].dropna()
-            if len(s) == 0:
+            col_series = df[col]
+            num_series = pd.to_numeric(col_series, errors="coerce")
+            finite_mask = num_series.notna() & np.isfinite(num_series.to_numpy(dtype=float, na_value=np.nan))
+            s = num_series[finite_mask]
+            valid_count = len(s)
+            missing_count = total_rows - valid_count
+
+            if missing_count > 0:
+                eval_note = (
+                    f"Evaluated {valid_count} of {total_rows} values "
+                    f"({missing_count} missing/non-finite observation(s) excluded from IQR denominator)."
+                )
+            else:
+                eval_note = f"Evaluated all {valid_count} values (100% valid observations)."
+
+            if valid_count == 0:
+                column_results[col] = IQROutlierColumnResult(
+                    column=col,
+                    q1=0.0,
+                    q3=0.0,
+                    iqr=0.0,
+                    multiplier=multiplier,
+                    lower_bound=0.0,
+                    upper_bound=0.0,
+                    lower_outliers_count=0,
+                    upper_outliers_count=0,
+                    total_outliers=0,
+                    outlier_pct=0.0,
+                    outlier_indices=[],
+                    min_val=0.0,
+                    max_val=0.0,
+                    valid_count=0,
+                    missing_count=total_rows,
+                    total_rows=total_rows,
+                    evaluation_note=f"No valid numeric values out of {total_rows} rows.",
+                )
                 continue
 
             q1 = float(s.quantile(0.25))
@@ -193,16 +334,15 @@ class AnomalyTool:
             lower_bound = float(q1 - (multiplier * iqr))
             upper_bound = float(q3 + (multiplier * iqr))
 
-            # Detect outliers across the full dataframe column (preserving original index)
-            col_series = df[col]
-            lower_mask = (col_series < lower_bound) & col_series.notna()
-            upper_mask = (col_series > upper_bound) & col_series.notna()
+            # Strictly below lower bound or strictly above upper bound
+            lower_mask = (num_series < lower_bound) & finite_mask
+            upper_mask = (num_series > upper_bound) & finite_mask
             total_mask = lower_mask | upper_mask
 
             lower_count = int(lower_mask.sum())
             upper_count = int(upper_mask.sum())
             total_outliers = lower_count + upper_count
-            outlier_pct = round((total_outliers / max(1, len(s))) * 100, 2)
+            outlier_pct = round((total_outliers / max(1, valid_count)) * 100, 2)
 
             outlier_idx = df.index[total_mask].tolist()
             all_outlier_indices_set.update(outlier_idx)
@@ -222,6 +362,10 @@ class AnomalyTool:
                 outlier_indices=outlier_idx,
                 min_val=round(float(s.min()), 4),
                 max_val=round(float(s.max()), 4),
+                valid_count=valid_count,
+                missing_count=missing_count,
+                total_rows=total_rows,
+                evaluation_note=eval_note,
             )
 
         all_outlier_indices = sorted(list(all_outlier_indices_set))
@@ -238,6 +382,7 @@ class AnomalyTool:
             outlier_rate=outlier_rate,
             all_outlier_indices=all_outlier_indices,
             multiplier=multiplier,
+            duplicate_columns=canonical_to_dups,
         )
 
     # =========================================================================
@@ -252,12 +397,14 @@ class AnomalyTool:
         contamination: Union[float, str] = 0.05,
         random_state: int = 42,
         dataset_name: str = "dataset",
+        exclude_duplicates: bool = True,
     ) -> IsolationForestResult:
         """Fit Isolation Forest model to detect multivariate numeric anomalies.
 
         Performs non-destructive preprocessing:
         - Filters out non-numeric and ID/index columns
-        - Safely imputes missing values for fitting
+        - Excludes exact duplicate numerical columns from multivariate model input when exclude_duplicates is True
+        - Safely imputes missing values and infinities for fitting without altering input DataFrame
         - Generates calibrated anomaly score (0.0 to 1.0, higher = more anomalous)
         - Labels records as 'Normal' or 'Anomaly'
         """
@@ -281,7 +428,9 @@ class AnomalyTool:
                 if is_id:
                     excluded_ids.append(f"{c} ({reason})")
                     continue
-                if df[c].dropna().nunique() <= 1:
+                num_s = pd.to_numeric(df[c], errors="coerce")
+                fin_s = num_s[num_s.notna() & np.isfinite(num_s.to_numpy(dtype=float, na_value=np.nan))]
+                if len(fin_s) == 0 or fin_s.nunique() <= 1:
                     excluded_other.append(f"{c} (Constant or all-null)")
                     continue
                 suitable.append(c)
@@ -292,27 +441,49 @@ class AnomalyTool:
                 "Ensure dataset contains valid numerical attributes (ID columns and constants are excluded)."
             )
 
-        if len(df) < 5:
-            raise ValueError(
-                f"Dataset contains only {len(df)} records. Isolation Forest requires at least 5 records to build isolation trees."
-            )
-
         preprocessing_notes: List[str] = []
-        preprocessing_notes.append(f"Selected {len(suitable)} numerical features: {', '.join(suitable)}")
+        preprocessing_notes.append(f"Initially selected {len(suitable)} numerical feature(s): {', '.join(suitable)}")
 
         if excluded_ids:
             preprocessing_notes.append(f"Excluded {len(excluded_ids)} identifier/index columns: {', '.join(excluded_ids)}")
         if excluded_other:
             preprocessing_notes.append(f"Excluded {len(excluded_other)} non-suitable columns: {', '.join(excluded_other)}")
 
-        # Construct feature matrix copy for modeling without modifying input DataFrame
-        X = df[suitable].copy()
+        # Detect and handle exact duplicate numerical features for multivariate modeling
+        duplicate_exclusions: List[str] = []
+        features_to_fit = list(suitable)
 
-        # Handle missing and infinite values
+        if exclude_duplicates:
+            canonical_to_dups, dup_to_canonical = cls.detect_duplicate_numerical_columns(df, columns=suitable)
+            if dup_to_canonical:
+                features_to_fit = [c for c in suitable if c not in dup_to_canonical]
+                for dup_col, can_col in dup_to_canonical.items():
+                    duplicate_exclusions.append(f"{dup_col} (Exact duplicate of canonical feature '{can_col}')")
+                    preprocessing_notes.append(
+                        f"Excluded duplicate feature '{dup_col}' from multivariate model: exact duplicate of '{can_col}'."
+                    )
+                preprocessing_notes.append(
+                    f"Excluded {len(dup_to_canonical)} exact duplicate feature(s) from multivariate trees to prevent multicollinear inflation."
+                )
+
+        if len(features_to_fit) < 2:
+            raise ValueError(
+                f"Isolation Forest requires at least 2 non-duplicate numerical features for multivariate analysis. "
+                f"Found {len(features_to_fit)} eligible feature(s) ({', '.join(features_to_fit)})."
+            )
+
+        if len(df) < 5:
+            raise ValueError(
+                f"Dataset contains only {len(df)} records. Isolation Forest requires at least 5 records to build isolation trees."
+            )
+
+        # Construct feature matrix copy for modeling without modifying input DataFrame
+        X = df[features_to_fit].copy()
+
+        # Handle missing and infinite values safely
         has_missing = False
-        for c in suitable:
-            # Replace inf with nan
-            X[c] = X[c].replace([np.inf, -np.inf], np.nan)
+        for c in features_to_fit:
+            X[c] = pd.to_numeric(X[c], errors="coerce").replace([np.inf, -np.inf], np.nan)
             col_missing = int(X[c].isna().sum())
             if col_missing > 0:
                 has_missing = True
@@ -347,11 +518,8 @@ class AnomalyTool:
         # Predictions: -1 for anomaly, 1 for normal
         raw_preds = model.predict(X)
         decision_scores = model.decision_function(X)
-        sample_scores = model.score_samples(X)
 
         # Calibrated anomaly score: 0.0 to 1.0 (higher = more anomalous)
-        # In sklearn, decision_function is < 0 for anomalies, > 0 for normal
-        # Score calculation: 0.5 - decision_function gives a smooth metric centered near 0.5
         min_dec = float(np.min(decision_scores))
         max_dec = float(np.max(decision_scores))
         span = max(1e-6, max_dec - min_dec)
@@ -361,7 +529,8 @@ class AnomalyTool:
         raw_decision_list = [round(float(d), 4) for d in decision_scores]
 
         labels: List[str] = ["Anomaly" if p == -1 else "Normal" for p in raw_preds]
-        anomaly_indices: List[Any] = [df.index[i] for i, p in enumerate(raw_preds) if p == -1]
+        anomaly_positions: List[int] = [i for i, p in enumerate(raw_preds) if p == -1]
+        anomaly_indices: List[Any] = [df.index[i] for i in anomaly_positions]
 
         anomaly_count = len(anomaly_indices)
         anomaly_pct = round((anomaly_count / max(1, len(df))) * 100, 2)
@@ -369,7 +538,7 @@ class AnomalyTool:
         return IsolationForestResult(
             dataset_name=dataset_name,
             rows_analyzed=len(df),
-            features_used=suitable,
+            features_used=features_to_fit,
             contamination=float(contam_val) if isinstance(contam_val, (int, float)) else 0.05,
             anomaly_count=anomaly_count,
             anomaly_pct=anomaly_pct,
@@ -377,8 +546,9 @@ class AnomalyTool:
             raw_decision_scores=raw_decision_list,
             anomaly_labels=labels,
             anomaly_indices=anomaly_indices,
+            anomaly_positions=anomaly_positions,
             preprocessing_notes=preprocessing_notes,
-            excluded_columns=excluded_ids + excluded_other,
+            excluded_columns=excluded_ids + excluded_other + duplicate_exclusions,
         )
 
     # =========================================================================

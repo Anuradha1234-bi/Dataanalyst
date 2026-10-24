@@ -93,8 +93,8 @@ def test_2_source_information_unavailable_when_no_lineage():
     lineage = inspect_column_lineage(columns, metadata=None)
     assert lineage["price"].source_dataset is None
     assert lineage["price_joined_x"].source_dataset is None
-    # Verify label explicitly notes Source information unavailable
-    assert "Source information unavailable" in lineage["price"].label
+    # Verify label and display explicitly note Source information unavailable
+    assert lineage["price"].to_dict()["source_dataset_display"] == "Source information unavailable"
     assert "Source information unavailable" in lineage["price_joined_x"].label
     c_dict = lineage["price_joined_x"].to_dict()
     assert c_dict["source_dataset_display"] == "Source information unavailable"

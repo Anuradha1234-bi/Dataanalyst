@@ -258,10 +258,72 @@ class ConversationContextManager:
             augmented_q = f"Show trend for {prev_group} in {prev_entities[:3]} over time"
             return augmented_q, modified_plan
 
-        # 6. Pronoun reference replacement: e.g. "What is the average of that column?", "Show it"
+        # 6. Grouping follow-up: e.g. "Now show it category-wise", "Show it category-wise", "Group it by category"
+        match_grp = (
+            re.search(r"\b([a-zA-Z0-9_]+)-wise\b", q_lower) or
+            re.search(r"^(?:now\s+)?(?:show\s+it\s+|group\s+it\s+|break\s+it\s+down\s+|break\s+down\s+)?by\s+([a-zA-Z0-9_]+)$", q_lower) or
+            re.search(r"\b(?:show\s+it\s+by|group\s+it\s+by|break\s+it\s+down\s+by|break\s+down\s+by)\s+([a-zA-Z0-9_]+)\b", q_lower)
+        )
+        if match_grp and (prev_metric or prev_plan.get("column")):
+            grp_cand = match_grp.group(1).strip()
+            if grp_cand not in ["it", "them", "those", "that", "all", "each", "other", "records", "rows", "values"]:
+                modified_plan = dict(prev_plan)
+                modified_plan["intent"] = "GROUP_BY"
+                modified_plan["column"] = prev_metric or prev_plan.get("column")
+                grp_clean = grp_cand.title() if grp_cand.islower() else grp_cand
+                modified_plan["group_by"] = [grp_clean]
+                modified_plan["aggregation"] = prev_plan.get("aggregation") or "sum"
+                modified_plan["sort"] = "descending"
+                modified_plan["output"] = {"table": True, "chart": True}
+                augmented_q = f"Show {modified_plan['column']} grouped by {grp_clean}"
+                return augmented_q, modified_plan
+
+        # 7. Comparison follow-up: e.g. "Compare it with the second-highest category"
+        if any(term in q_lower for term in ["second-highest", "second highest", "compare with the second", "compare it with the second"]):
+            if (prev_metric or prev_plan.get("column")):
+                modified_plan = dict(prev_plan)
+                modified_plan["intent"] = "TOP_N"
+                modified_plan["column"] = prev_metric or prev_plan.get("column")
+                grp_col = prev_group or (prev_plan.get("group_by") or ["Category"])[0]
+                modified_plan["group_by"] = [grp_col]
+                modified_plan["limit"] = 2
+                modified_plan["sort"] = "descending"
+                modified_plan["output"] = {"table": True, "chart": True}
+                augmented_q = f"Compare highest and second highest {grp_col} by {modified_plan['column']}"
+                return augmented_q, modified_plan
+
+        # 8. Superlative / Highest Entity follow-up: e.g. "Which category is highest?", "Which is highest?"
+        if not any(w in q_lower for w in ["second", "2nd", "third", "3rd"]) and any(term in q_lower for term in ["which category is highest", "which is highest", "which is the highest", "which one is highest", "which product is highest", "highest category"]):
+            if (prev_metric or prev_plan.get("column")):
+                modified_plan = dict(prev_plan)
+                modified_plan["intent"] = "TOP_N"
+                modified_plan["column"] = prev_metric or prev_plan.get("column")
+                grp_col = prev_group or (prev_plan.get("group_by") or ["Category"])[0]
+                modified_plan["group_by"] = [grp_col]
+                modified_plan["limit"] = 1
+                modified_plan["sort"] = "descending"
+                modified_plan["output"] = {"table": True, "chart": False}
+                augmented_q = f"Which {grp_col} has the highest {modified_plan['column']}"
+                return augmented_q, modified_plan
+
+        # 9. Pronoun reference replacement: e.g. "What is the average of that column?", "Show it"
         if "that column" in q_lower and prev_metric:
             augmented_q = re.sub(r"\bthat\s+column\b", prev_metric, question, flags=re.IGNORECASE)
             return augmented_q, None
+
+        if re.search(r"\b(?:average|mean|avg)\s+of\s+it\b", q_lower) and prev_metric:
+            modified_plan = dict(prev_plan)
+            modified_plan["intent"] = "AVERAGE"
+            modified_plan["aggregation"] = "mean"
+            modified_plan["column"] = prev_metric
+            return f"What is the average of {prev_metric}", modified_plan
+
+        if re.search(r"\b(?:sum|total)\s+of\s+it\b", q_lower) and prev_metric:
+            modified_plan = dict(prev_plan)
+            modified_plan["intent"] = "SUM"
+            modified_plan["aggregation"] = "sum"
+            modified_plan["column"] = prev_metric
+            return f"What is the total of {prev_metric}", modified_plan
 
         if q_lower in ("show it", "show it again", "show data"):
             return context.get("previous_question", question), prev_plan

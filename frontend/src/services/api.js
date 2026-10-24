@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 // Base API configuration using VITE_API_URL environment variable
-const rawBaseUrl = (import.meta.env.VITE_API_URL || 'http://127.0.0.1:8002').trim();
+const rawBaseUrl = (import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000').trim();
 const normalizedUrl = rawBaseUrl.replace(/\/+$/, '');
 const baseURL = normalizedUrl.endsWith('/api') ? normalizedUrl : `${normalizedUrl}/api`;
 

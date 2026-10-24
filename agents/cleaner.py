@@ -189,7 +189,9 @@ class CleanerAgent:
                     try:
                         with warnings.catch_warnings():
                             warnings.filterwarnings("ignore", category=UserWarning)
-                            parsed_dates = pd.to_datetime(str_all, dayfirst=True, errors="coerce")
+                            parsed_dates = pd.to_datetime(str_all, errors="coerce")
+                            if parsed_dates.notna().mean() < 0.70:
+                                parsed_dates = pd.to_datetime(str_all, dayfirst=True, errors="coerce")
                         valid_dt_mask = parsed_dates.notna()
                         valid_dt = int(valid_dt_mask.sum())
                         total_dt = int(len(str_all))

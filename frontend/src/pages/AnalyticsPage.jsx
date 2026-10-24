@@ -208,6 +208,17 @@ export const AnalyticsPage = () => {
     setInsightsResponse(null);
   };
 
+  // Switch between Original and Cleaned version without stale data contamination
+  const handleVersionToggle = (newVersion) => {
+    if (newVersion === selectedVersion) return;
+    setSelectedVersion(newVersion);
+    setChartResponse(null);
+    setTrendResponse(null);
+    setGroupResponse(null);
+    setStatsResponse(null);
+    setInsightsResponse(null);
+  };
+
   // -------------------------------------------------------------
   // Explorer Actions: Generate Dynamic Chart
   // -------------------------------------------------------------
@@ -411,7 +422,7 @@ export const AnalyticsPage = () => {
   }, [statsResponse, statsSearch]);
 
   return (
-    <div className="space-y-6">
+    <div className="max-w-7xl mx-auto w-full min-w-0 space-y-6">
       {/* ------------------------------------------------------------- */}
       {/* Page Header & Dataset Selector Bar */}
       {/* ------------------------------------------------------------- */}
@@ -446,7 +457,7 @@ export const AnalyticsPage = () => {
                 ) : (
                   datasets.map((d) => (
                     <option key={d.id} value={d.id}>
-                      {d.original_filename || d.filename} ({d.rows || 0} rows)
+                      [ID #{d.id}] {d.original_filename || d.filename} ({d.rows || 0} rows, {d.columns || 0} cols){d.has_cleaned ? ' • Cleaned Available' : ''}
                     </option>
                   ))
                 )}
@@ -457,7 +468,7 @@ export const AnalyticsPage = () => {
             {selectedDataset && (
               <div className="flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200 text-xs">
                 <button
-                  onClick={() => setSelectedVersion('original')}
+                  onClick={() => handleVersionToggle('original')}
                   className={`px-3 py-1 rounded-lg font-medium transition-all ${
                     selectedVersion === 'original'
                       ? 'bg-white text-slate-900 shadow-xs'
@@ -467,7 +478,7 @@ export const AnalyticsPage = () => {
                   Original
                 </button>
                 <button
-                  onClick={() => setSelectedVersion('cleaned')}
+                  onClick={() => handleVersionToggle('cleaned')}
                   disabled={!selectedDataset.has_cleaned}
                   title={!selectedDataset.has_cleaned ? 'No cleaned version available for this dataset' : ''}
                   className={`px-3 py-1 rounded-lg font-medium transition-all flex items-center gap-1.5 ${
@@ -495,6 +506,51 @@ export const AnalyticsPage = () => {
             </button>
           </div>
         </div>
+
+        {/* Dataset Provenance & Integrity Status Bar */}
+        {selectedDataset && (
+          <div className="mt-4 pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-semibold text-slate-800 bg-slate-100 px-2.5 py-1 rounded-lg border border-slate-200">
+                Active Dataset ID #{selectedDataset.id}
+              </span>
+              <span className="font-mono text-slate-700 bg-blue-50 text-blue-700 px-2.5 py-1 rounded-lg border border-blue-200">
+                {selectedDataset.original_filename || selectedDataset.filename}
+              </span>
+              <span className="bg-slate-100 px-2.5 py-1 rounded-lg text-slate-600">
+                Version: <strong className="text-slate-900 uppercase">{selectedVersion}</strong>
+              </span>
+              <span className="bg-slate-100 px-2.5 py-1 rounded-lg text-slate-600">
+                Records: <strong className="text-slate-900 font-mono">{(overview?.rows || selectedDataset.rows || 0).toLocaleString()}</strong> rows × <strong className="text-slate-900 font-mono">{overview?.columns || selectedDataset.columns || 0}</strong> cols
+              </span>
+            </div>
+            {overview?.analysis_timestamp && (
+              <span className="text-[11px] text-slate-400">
+                Analyzed at: {new Date(overview.analysis_timestamp).toLocaleTimeString()}
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* Duplicate Columns / Duplicate Rows Integrity Warnings */}
+        {(overview?.duplicate_column_warnings?.length > 0 || (overview?.duplicate_row_count && overview.duplicate_row_count > 0)) && (
+          <div className="mt-3 p-3.5 bg-amber-50/80 border border-amber-200 rounded-xl text-xs text-amber-900 space-y-1">
+            <div className="flex items-center gap-1.5 font-bold">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+              <span>Dataset Integrity Notice (Columns & Records Preserved Without Alteration)</span>
+            </div>
+            {overview.duplicate_row_count > 0 && (
+              <p className="text-[11px] text-amber-800 ml-5">
+                • Identified <strong>{overview.duplicate_row_count.toLocaleString()}</strong> duplicate rows in active dataset version.
+              </p>
+            )}
+            {overview.duplicate_column_warnings?.map((warn, wIdx) => (
+              <p key={wIdx} className="text-[11px] text-amber-800 ml-5">
+                • {warn}
+              </p>
+            ))}
+          </div>
+        )}
 
         {/* Global Overview Error Message */}
         {overviewError && (
@@ -652,14 +708,15 @@ export const AnalyticsPage = () => {
             {/* Chart Type Picker */}
             <div className="space-y-1.5">
               <label className="text-[11px] font-semibold text-slate-700">Visualization Type</label>
-              <div className="grid grid-cols-4 gap-1.5">
+              <div className="grid grid-cols-3 sm:grid-cols-5 gap-1.5">
                 {[
                   { id: 'bar', label: 'Bar', icon: BarChart3 },
                   { id: 'line', label: 'Line', icon: TrendingUp },
-                  { id: 'scatter', label: 'Scatter', icon: Activity },
-                  { id: 'histogram', label: 'Hist', icon: BarChart3 },
-                  { id: 'heatmap', label: 'Matrix', icon: Grid },
                   { id: 'donut', label: 'Donut', icon: PieChart },
+                  { id: 'pie', label: 'Pie', icon: PieChart },
+                  { id: 'histogram', label: 'Hist', icon: BarChart3 },
+                  { id: 'scatter', label: 'Scatter', icon: Activity },
+                  { id: 'heatmap', label: 'Matrix', icon: Grid },
                   { id: 'boxplot', label: 'Box', icon: Activity },
                   { id: 'table', label: 'Table', icon: TableIcon },
                 ].map((t) => {
@@ -682,6 +739,21 @@ export const AnalyticsPage = () => {
                 })}
               </div>
             </div>
+
+            {/* Intelligent Chart Recommendations Card */}
+            {chartResponse?.recommendations && chartResponse.recommendations.length > 0 && (
+              <div className="p-3 bg-blue-50/70 border border-blue-200 rounded-xl space-y-1.5 text-xs">
+                <div className="flex items-center gap-1.5 text-blue-800 font-bold text-[11px]">
+                  <Sparkles className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                  <span>Intelligent Chart Recommendations</span>
+                </div>
+                {chartResponse.recommendations.map((rec, rIdx) => (
+                  <p key={rIdx} className="text-[11px] text-blue-900/85 leading-relaxed">
+                    • {rec}
+                  </p>
+                ))}
+              </div>
+            )}
 
             {/* X-Axis Dimension Selector */}
             {chartType !== 'heatmap' && (
@@ -852,13 +924,38 @@ export const AnalyticsPage = () => {
 
             {/* Chart Container */}
             <div className="bg-white border border-[#E2E8F0] rounded-2xl p-5 shadow-xs space-y-4">
-              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
                 <div>
-                  <h3 className="text-xs font-bold text-[#0F172A]">
-                    {chartResponse?.title || 'Visual Output'}
-                  </h3>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200">
+                      Graphical Representation
+                    </span>
+                    <h3 className="text-xs font-bold text-[#0F172A]">
+                      {chartResponse?.title || 'Visual Explorer from Actual Selected CSV'}
+                    </h3>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-500 mt-1">
+                    <span>
+                      Dataset: <strong className="text-slate-800 font-mono">[ID #{selectedDatasetId}] {selectedDataset?.original_filename || selectedDataset?.filename}</strong>
+                    </span>
+                    <span>
+                      Version: <strong className="text-blue-700 uppercase font-semibold">{selectedVersion}</strong>
+                    </span>
+                    {chartResponse?.records_used !== undefined && (
+                      <span>
+                        Records Analyzed: <strong className="text-slate-800 font-mono">{chartResponse.records_used.toLocaleString()}</strong> rows
+                      </span>
+                    )}
+                    {chartResponse?.records_excluded !== undefined && chartResponse.records_excluded > 0 && (
+                      <span className="text-amber-700">
+                        ({chartResponse.records_excluded.toLocaleString()} filtered/missing rows excluded)
+                      </span>
+                    )}
+                  </div>
+
                   {chartResponse?.summary_stats && (
-                    <div className="flex items-center gap-3 text-[10px] text-slate-500 mt-0.5">
+                    <div className="flex items-center gap-3 text-[10px] text-slate-500 mt-1 pt-1 border-t border-slate-50">
                       <span>Total: <strong className="text-slate-800 font-mono">{chartResponse.summary_stats.sum}</strong></span>
                       <span>Mean: <strong className="text-slate-800 font-mono">{chartResponse.summary_stats.mean}</strong></span>
                       <span>Points: <strong className="text-slate-800 font-mono">{chartResponse.summary_stats.count}</strong></span>
@@ -866,7 +963,7 @@ export const AnalyticsPage = () => {
                   )}
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 shrink-0">
                   <button
                     onClick={() => setShowTableUnderChart(!showTableUnderChart)}
                     className="px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:text-slate-900 bg-slate-100 rounded-lg transition-colors flex items-center gap-1 cursor-pointer"
@@ -892,6 +989,18 @@ export const AnalyticsPage = () => {
                   )}
                 </div>
               </div>
+
+              {/* Chart Warning Callout */}
+              {chartResponse?.warnings?.length > 0 && (
+                <div className="p-2.5 bg-amber-50/80 border border-amber-200 rounded-xl text-xs text-amber-900 space-y-1">
+                  {chartResponse.warnings.map((w, idx) => (
+                    <div key={idx} className="flex items-center gap-1.5 text-[11px]">
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                      <span>{w}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
 
               {/* Render Chart Component */}
               {loadingChart ? (
@@ -998,7 +1107,7 @@ export const AnalyticsPage = () => {
 
                 {/* Interval Toggle */}
                 <div className="flex items-center bg-slate-100 p-0.5 rounded-lg border border-slate-200 text-xs">
-                  {['daily', 'weekly', 'monthly'].map((intv) => (
+                  {['daily', 'weekly', 'monthly', 'quarterly'].map((intv) => (
                     <button
                       key={intv}
                       onClick={() => setTrendInterval(intv)}
@@ -1039,7 +1148,7 @@ export const AnalyticsPage = () => {
             ) : trendResponse ? (
               <div className="mt-4 space-y-4">
                 {/* Metric Summary Badges */}
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                   <div className="bg-slate-50 border border-slate-200 rounded-xl p-3">
                     <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
                       Overall Trajectory
@@ -1061,6 +1170,8 @@ export const AnalyticsPage = () => {
                             ? `${trendResponse.previous_period_comparison.change_pct > 0 ? '+' : ''}${
                                 trendResponse.previous_period_comparison.change_pct
                               }%`
+                            : trendResponse.previous_period_comparison.change_direction === 'baseline_zero'
+                            ? 'Baseline Zero'
                             : 'N/A'}
                         </span>
                         <span
@@ -1084,11 +1195,23 @@ export const AnalyticsPage = () => {
 
                   <div className="bg-slate-50 border border-slate-200 rounded-xl p-3">
                     <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
-                      Observed Data Points
+                      Observed Interval Buckets
                     </span>
                     <div className="text-base font-bold text-slate-800 mt-0.5">
-                      {trendResponse.data_points.length} {trendResponse.interval} buckets
+                      {trendResponse.data_points.length} {trendResponse.interval} points
                     </div>
+                  </div>
+
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-3">
+                    <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
+                      Date Range & Observations
+                    </span>
+                    <div className="text-xs font-bold text-slate-800 mt-1 truncate" title={`${trendResponse.start_date || 'N/A'} to ${trendResponse.end_date || 'N/A'}`}>
+                      {trendResponse.start_date || '—'} → {trendResponse.end_date || '—'}
+                    </div>
+                    <p className="text-[10px] text-slate-400 mt-0.5">
+                      {trendResponse.observations_count ? `${trendResponse.observations_count.toLocaleString()} valid observations` : 'Validated dates'}
+                    </p>
                   </div>
                 </div>
 
@@ -1347,7 +1470,7 @@ export const AnalyticsPage = () => {
                         <th className="px-3 py-2">Q75</th>
                         <th className="px-3 py-2">Max</th>
                         <th className="px-3 py-2">Skew</th>
-                        <th className="px-3 py-2">Outliers</th>
+                        <th className="px-3 py-2">Outliers (IQR 1.5x)</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 font-mono text-[11px]">
@@ -1365,7 +1488,7 @@ export const AnalyticsPage = () => {
                           <td className="px-3 py-2 text-slate-600">{r.max}</td>
                           <td className="px-3 py-2 text-slate-600">{r.skewness !== null ? r.skewness : '—'}</td>
                           <td className="px-3 py-2 text-amber-700 font-bold">
-                            {r.outlier_count} ({r.outlier_pct}%)
+                            {r.outlier_count} / {r.count} ({r.outlier_pct}%)
                           </td>
                         </tr>
                       ))}
@@ -1383,7 +1506,7 @@ export const AnalyticsPage = () => {
                       Tukey IQR Anomaly & Outlier Distribution
                     </h3>
                     <p className="text-[11px] text-slate-500 mt-0.5">
-                      Threshold: Values outside [Q1 - 1.5*IQR, Q3 + 1.5*IQR].
+                      Threshold: Values outside [Q1 - 1.5*IQR, Q3 + 1.5*IQR]. Denominator is strictly valid column observations.
                     </p>
                   </div>
 
@@ -1409,6 +1532,18 @@ export const AnalyticsPage = () => {
                       </div>
                     ))}
                   </div>
+                </div>
+              )}
+
+              {/* Statistical Notes & Invariant Columns Callout */}
+              {statsResponse.limitations && statsResponse.limitations.length > 0 && (
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1 text-xs text-slate-600">
+                  <span className="font-bold text-slate-700 block">Statistical Method & Sample Scope Notes:</span>
+                  {statsResponse.limitations.map((lim, lIdx) => (
+                    <div key={lIdx} className="text-[11px] text-slate-500">
+                      • {lim}
+                    </div>
+                  ))}
                 </div>
               )}
 
@@ -1506,8 +1641,28 @@ export const AnalyticsPage = () => {
 
                       <p className="text-xs text-slate-700 leading-relaxed">{item.statement}</p>
 
+                      <div className="flex flex-wrap items-center gap-2 text-[10px] text-slate-500 pt-1.5 border-t border-slate-100">
+                        {item.observations_used !== undefined && item.observations_used !== null && (
+                          <span className="bg-slate-100 px-2 py-0.5 rounded font-mono font-medium text-slate-700">
+                            n = {item.observations_used.toLocaleString()} observations
+                          </span>
+                        )}
+                        {item.calculation_method && (
+                          <span className="text-slate-500">
+                            Method: <em>{item.calculation_method}</em>
+                          </span>
+                        )}
+                      </div>
+
+                      {item.next_step && (
+                        <div className="text-[11px] text-blue-800 bg-blue-50/70 p-2 rounded-xl flex items-start gap-1.5 border border-blue-200">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-blue-600 shrink-0 mt-0.5" />
+                          <span><strong>Recommended Action:</strong> {item.next_step}</span>
+                        </div>
+                      )}
+
                       {item.limitations && (
-                        <div className="text-[10px] text-slate-400 italic pt-1 border-t border-slate-100">
+                        <div className="text-[10px] text-slate-400 italic pt-0.5">
                           Limitation: {item.limitations}
                         </div>
                       )}

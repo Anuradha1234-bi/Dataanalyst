@@ -17,6 +17,13 @@ import {
   HelpCircle,
   ArrowRight,
   ArrowLeftRight,
+  Copy,
+  Eye,
+  EyeOff,
+  Layers,
+  FileSearch,
+  CheckCheck,
+  Split,
 } from 'lucide-react';
 import { relationshipService } from '../services/relationshipService';
 import { extractErrorMessage } from '../services/api';
@@ -44,6 +51,15 @@ export const RelationshipManager = ({
   // Status map for user reviews: { [relationshipId]: 'ACCEPTED' | 'REJECTED' | 'IGNORED' }
   const [reviewStatuses, setReviewStatuses] = useState({});
 
+  // Feature 1: Smart Duplicate Datasets State
+  const [duplicateDatasets, setDuplicateDatasets] = useState([]);
+  const [ignoredPairs, setIgnoredPairs] = useState(new Set());
+  const [showIgnoredDuplicates, setShowIgnoredDuplicates] = useState(false);
+  const [scanningDuplicates, setScanningDuplicates] = useState(false);
+  const [comparisonModalPair, setComparisonModalPair] = useState(null);
+  const [differencesModalPair, setDifferencesModalPair] = useState(null);
+  const [differencesActiveTab, setDifferencesActiveTab] = useState(1); // 1 for D1, 2 for D2
+
   // Loading & notification states
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -64,6 +80,28 @@ export const RelationshipManager = ({
   const [customName, setCustomName] = useState('');
   const [confirmCheckbox, setConfirmCheckbox] = useState(false);
   const [applyingJoin, setApplyingJoin] = useState(false);
+
+  // Load existing duplicates on mount if datasets are available
+  useEffect(() => {
+    const loadSavedDuplicates = async () => {
+      try {
+        const data = await relationshipService.getDuplicates();
+        if (data && data.duplicate_datasets && data.duplicate_datasets.length > 0) {
+          setDuplicateDatasets(data.duplicate_datasets);
+          const ignored = new Set();
+          data.duplicate_datasets.forEach((p) => {
+            if (p.ignored) ignored.add(p.id);
+          });
+          setIgnoredPairs(ignored);
+        }
+      } catch (err) {
+        // Silently tolerate if no duplicates saved yet
+      }
+    };
+    if (datasets.length >= 2) {
+      loadSavedDuplicates();
+    }
+  }, [datasets.length]);
 
   // Sync selectedIds if empty and datasets change
   useEffect(() => {
@@ -92,7 +130,7 @@ export const RelationshipManager = ({
     setSelectedIds([]);
   };
 
-  // Discover relationships across selected datasets
+  // Discover relationships and smart duplicates across selected datasets
   const handleDiscover = async () => {
     if (selectedIds.length < 2) {
       setError('Please select at least 2 datasets to detect relationships between them.');
@@ -106,7 +144,9 @@ export const RelationshipManager = ({
     try {
       const data = await relationshipService.detectRelationships(selectedIds);
       const rels = data.relationships || [];
+      const dups = data.duplicate_datasets || [];
       setRelationships(rels);
+      setDuplicateDatasets(dups);
       setAnalyzedCount(data.analyzed_datasets_count || selectedIds.length);
       setScanSummary(data.scan_summary || null);
 
@@ -117,15 +157,81 @@ export const RelationshipManager = ({
       });
       setReviewStatuses(initialStatuses);
 
-      if (rels.length === 0) {
-        setSuccessMessage('');
-      } else {
-        setSuccessMessage(`Scan complete: Discovered ${rels.length} relationship candidate(s) across ${data.analyzed_datasets_count || selectedIds.length} datasets.`);
+      // Initialize ignored duplicate set
+      const initialIgnored = new Set();
+      dups.forEach((p) => {
+        if (p.ignored) initialIgnored.add(p.id);
+      });
+      setIgnoredPairs(initialIgnored);
+
+      let msg = `Scan complete: Discovered ${rels.length} relationship candidate(s)`;
+      if (dups.length > 0) {
+        msg += ` and identified ${dups.length} duplicate/overlap dataset pair(s)`;
       }
+      msg += ` across ${data.analyzed_datasets_count || selectedIds.length} datasets.`;
+      setSuccessMessage(msg);
     } catch (err) {
       setError(extractErrorMessage(err));
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Dedicated Duplicate Scanner
+  const handleScanDuplicates = async () => {
+    if (selectedIds.length < 2) {
+      setError('Please select at least 2 datasets to scan for duplicates.');
+      return;
+    }
+    setScanningDuplicates(true);
+    setError('');
+    try {
+      const data = await relationshipService.detectDuplicates(selectedIds);
+      const dups = data.duplicate_datasets || [];
+      setDuplicateDatasets(dups);
+      const initialIgnored = new Set();
+      dups.forEach((p) => {
+        if (p.ignored) initialIgnored.add(p.id);
+      });
+      setIgnoredPairs(initialIgnored);
+      if (dups.length === 0) {
+        setSuccessMessage('Duplicate scan complete: No duplicate datasets or high-overlap pairs found.');
+      } else {
+        setSuccessMessage(`Duplicate scan complete: Found ${dups.length} duplicate/overlap dataset pair(s).`);
+      }
+    } catch (err) {
+      setError(extractErrorMessage(err));
+    } finally {
+      setScanningDuplicates(false);
+    }
+  };
+
+  // Non-destructive ignore toggle
+  const handleToggleIgnoreDuplicate = async (pair) => {
+    const isIgnored = ignoredPairs.has(pair.id);
+    const newIgnored = !isIgnored;
+    try {
+      await relationshipService.ignoreDuplicate(pair.id, newIgnored);
+      setIgnoredPairs((prev) => {
+        const next = new Set(prev);
+        if (newIgnored) {
+          next.add(pair.id);
+        } else {
+          next.delete(pair.id);
+        }
+        return next;
+      });
+    } catch (err) {
+      // Local fallback state
+      setIgnoredPairs((prev) => {
+        const next = new Set(prev);
+        if (newIgnored) {
+          next.add(pair.id);
+        } else {
+          next.delete(pair.id);
+        }
+        return next;
+      });
     }
   };
 
@@ -378,6 +484,295 @@ export const RelationshipManager = ({
             );
           })}
         </div>
+      </div>
+
+      {/* ---------------- FEATURE 1: SMART DUPLICATE DATASET DETECTION ---------------- */}
+      <div className="bg-white border border-[#E2E8F0] rounded-xl p-5 shadow-xs space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#F1F5F9] pb-4">
+          <div>
+            <div className="flex items-center gap-2">
+              <div className="p-1.5 rounded-lg bg-indigo-50 border border-indigo-200 text-indigo-600">
+                <Copy className="w-4 h-4" />
+              </div>
+              <h2 className="text-sm font-bold text-[#0F172A]">
+                Smart Duplicate Dataset Detection
+              </h2>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200">
+                Content-Based
+              </span>
+            </div>
+            <p className="text-xs text-[#64748B] mt-1 leading-relaxed">
+              Detects duplicate and substantially overlapping datasets by comparing real tabular contents — invariant to filenames, extensions (CSV/XLSX), row order, column order, and header casing.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {ignoredPairs.size > 0 && (
+              <button
+                onClick={() => setShowIgnoredDuplicates((prev) => !prev)}
+                className="flex items-center gap-1.5 px-3 py-1.5 border border-slate-200 text-slate-600 hover:bg-slate-50 rounded-lg text-xs font-medium cursor-pointer"
+              >
+                {showIgnoredDuplicates ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                <span>{showIgnoredDuplicates ? 'Hide Ignored' : `Show Ignored (${ignoredPairs.size})`}</span>
+              </button>
+            )}
+
+            <button
+              onClick={handleScanDuplicates}
+              disabled={scanningDuplicates || selectedIds.length < 2}
+              className="flex items-center gap-1.5 px-3.5 py-1.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${scanningDuplicates ? 'animate-spin' : ''}`} />
+              <span>{scanningDuplicates ? 'Comparing Tabular Data...' : 'Scan Duplicates'}</span>
+            </button>
+          </div>
+        </div>
+
+        {/* List of Detected Duplicate Pairs */}
+        {(() => {
+          const visiblePairs = duplicateDatasets.filter(
+            (p) => showIgnoredDuplicates || !ignoredPairs.has(p.id)
+          );
+
+          if (duplicateDatasets.length === 0) {
+            return (
+              <div className="p-6 text-center border border-dashed border-[#CBD5E1] rounded-xl space-y-1.5 text-xs text-[#64748B]">
+                <div className="w-9 h-9 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-center mx-auto text-slate-500">
+                  <CheckCheck className="w-4 h-4" />
+                </div>
+                <div className="font-semibold text-[#0F172A]">No Duplicate Datasets Identified</div>
+                <p className="text-[11px] max-w-md mx-auto">
+                  Click <strong>Scan Duplicates</strong> or <strong>Discover Relationships</strong> to compare actual cell values across your selected datasets.
+                </p>
+              </div>
+            );
+          }
+
+          if (visiblePairs.length === 0 && duplicateDatasets.length > 0) {
+            return (
+              <div className="p-4 text-center border border-slate-200 rounded-xl text-xs text-[#64748B] space-y-2">
+                <span>All {duplicateDatasets.length} detected duplicate pair(s) are currently ignored.</span>
+                <div>
+                  <button
+                    onClick={() => setShowIgnoredDuplicates(true)}
+                    className="text-xs text-[#2563EB] font-semibold underline hover:text-[#1D4ED8]"
+                  >
+                    View ignored duplicate pairs
+                  </button>
+                </div>
+              </div>
+            );
+          }
+
+          return (
+            <div className="space-y-3.5">
+              {visiblePairs.map((pair) => {
+                const isIgnored = ignoredPairs.has(pair.id);
+                const isExact = pair.status === 'EXACT_DUPLICATE';
+                const isPotential = pair.status === 'POTENTIAL_DUPLICATE';
+                const isPartial = pair.status === 'PARTIAL_OVERLAP';
+
+                return (
+                  <div
+                    key={pair.id}
+                    className={`border rounded-xl p-4.5 transition-all space-y-3 ${
+                      isIgnored
+                        ? 'opacity-60 bg-slate-50/70 border-slate-200'
+                        : isExact
+                        ? 'bg-emerald-50/20 border-emerald-300 ring-1 ring-emerald-200'
+                        : isPotential
+                        ? 'bg-amber-50/20 border-amber-300 ring-1 ring-amber-200'
+                        : 'bg-blue-50/20 border-blue-200'
+                    }`}
+                  >
+                    {/* Header: Detection Status & ID */}
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                      <div className="flex flex-wrap items-center gap-2">
+                        {/* Status Badge */}
+                        {isExact && (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300 shadow-2xs">
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                            Exact Duplicate (100% Match)
+                          </span>
+                        )}
+                        {isPotential && (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-300 shadow-2xs">
+                            <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+                            Potential Duplicate ({pair.overlap_pct}%)
+                          </span>
+                        )}
+                        {isPartial && (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-blue-100 text-blue-800 border border-blue-300 shadow-2xs">
+                            <Layers className="w-3.5 h-3.5 text-blue-600" />
+                            Partial Overlap ({pair.overlap_pct}%)
+                          </span>
+                        )}
+
+                        {isIgnored && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-slate-200 text-slate-700">
+                            Ignored
+                          </span>
+                        )}
+
+                        <span className="text-[11px] text-[#64748B] font-mono">
+                          Pair ID: {pair.id}
+                        </span>
+                      </div>
+
+                      {/* Overlap Percentage Bar / Pill */}
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] text-[#64748B]">Content Match:</span>
+                        <div className="w-24 h-2 rounded-full bg-slate-200 overflow-hidden">
+                          <div
+                            className={`h-full rounded-full ${
+                              isExact ? 'bg-emerald-500' : isPotential ? 'bg-amber-500' : 'bg-blue-500'
+                            }`}
+                            style={{ width: `${Math.min(100, Math.max(5, pair.overlap_pct))}%` }}
+                          />
+                        </div>
+                        <span className="text-xs font-bold font-mono text-[#0F172A]">
+                          {pair.overlap_pct}%
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Dataset Comparison Cards Row */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                      {/* Dataset 1 */}
+                      <div className="p-3 bg-white border border-[#E2E8F0] rounded-lg shadow-2xs space-y-1">
+                        <div className="text-[10px] uppercase font-bold text-[#64748B] flex items-center justify-between">
+                          <span>Dataset 1</span>
+                          <span className="font-mono text-slate-400">ID #{pair.dataset1_id}</span>
+                        </div>
+                        <div className="font-bold text-[#0F172A] truncate" title={pair.dataset1_name}>
+                          {pair.dataset1_name}
+                        </div>
+                        <div className="text-[11px] text-[#64748B] flex items-center gap-2 pt-0.5">
+                          <span>{pair.dataset1_rows?.toLocaleString()} rows</span>
+                          <span>•</span>
+                          <span>{pair.dataset1_columns} columns</span>
+                        </div>
+                      </div>
+
+                      {/* Dataset 2 */}
+                      <div className="p-3 bg-white border border-[#E2E8F0] rounded-lg shadow-2xs space-y-1">
+                        <div className="text-[10px] uppercase font-bold text-[#64748B] flex items-center justify-between">
+                          <span>Dataset 2</span>
+                          <span className="font-mono text-slate-400">ID #{pair.dataset2_id}</span>
+                        </div>
+                        <div className="font-bold text-[#0F172A] truncate" title={pair.dataset2_name}>
+                          {pair.dataset2_name}
+                        </div>
+                        <div className="text-[11px] text-[#64748B] flex items-center gap-2 pt-0.5">
+                          <span>{pair.dataset2_rows?.toLocaleString()} rows</span>
+                          <span>•</span>
+                          <span>{pair.dataset2_columns} columns</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Content Metrics Grid */}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                      <div className="p-2.5 rounded-lg bg-white border border-[#E2E8F0]">
+                        <div className="text-[10px] uppercase font-bold text-[#64748B]">Matching Records</div>
+                        <div className="text-sm font-bold text-[#0F172A] font-mono mt-0.5">
+                          {pair.matching_records_count?.toLocaleString()}
+                        </div>
+                      </div>
+
+                      <div className="p-2.5 rounded-lg bg-white border border-[#E2E8F0]">
+                        <div className="text-[10px] uppercase font-bold text-[#64748B]">Unique to D1</div>
+                        <div className="text-sm font-bold text-[#0F172A] font-mono mt-0.5">
+                          {pair.unique_records_dataset1_count?.toLocaleString()}
+                        </div>
+                      </div>
+
+                      <div className="p-2.5 rounded-lg bg-white border border-[#E2E8F0]">
+                        <div className="text-[10px] uppercase font-bold text-[#64748B]">Unique to D2</div>
+                        <div className="text-sm font-bold text-[#0F172A] font-mono mt-0.5">
+                          {pair.unique_records_dataset2_count?.toLocaleString()}
+                        </div>
+                      </div>
+
+                      <div className="p-2.5 rounded-lg bg-white border border-[#E2E8F0]">
+                        <div className="text-[10px] uppercase font-bold text-[#64748B]">Overlap Ratio</div>
+                        <div className="text-sm font-bold text-[#0F172A] font-mono mt-0.5">
+                          {pair.overlap_pct}%
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Differences & Comparison Method Banner */}
+                    <div className="p-3 bg-white/80 border border-[#E2E8F0] rounded-lg text-xs space-y-1.5 text-[#334155]">
+                      <div className="flex items-center gap-1.5 font-bold text-[#0F172A] text-[11px]">
+                        <Info className="w-3.5 h-3.5 text-blue-600" />
+                        <span>Comparison Method:</span>
+                        <span className="font-normal text-[#64748B]">{pair.comparison_method}</span>
+                      </div>
+
+                      {pair.differences && pair.differences.length > 0 && (
+                        <div className="flex items-start gap-1.5 text-[11px] pt-1 border-t border-[#F1F5F9]">
+                          <span className="font-semibold text-slate-700 shrink-0">Differences Noted:</span>
+                          <div className="flex flex-wrap gap-1">
+                            {pair.differences.map((diff, idx) => (
+                              <span
+                                key={idx}
+                                className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200 text-[10px]"
+                              >
+                                {diff}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Safe Actions Toolbar */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[#E2E8F0]">
+                      <div className="text-[11px] text-[#64748B] flex items-center gap-1">
+                        <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                        <span>Non-destructive inspection only. Source datasets remain unchanged.</span>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => setComparisonModalPair(pair)}
+                          className="flex items-center gap-1 px-3 py-1.5 bg-white hover:bg-slate-50 border border-[#CBD5E1] text-[#0F172A] rounded-lg text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
+                        >
+                          <FileSearch className="w-3.5 h-3.5 text-blue-600" />
+                          <span>View Comparison</span>
+                        </button>
+
+                        <button
+                          onClick={() => {
+                            setDifferencesModalPair(pair);
+                            setDifferencesActiveTab(1);
+                          }}
+                          className="flex items-center gap-1 px-3 py-1.5 bg-white hover:bg-slate-50 border border-[#CBD5E1] text-[#0F172A] rounded-lg text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
+                        >
+                          <Split className="w-3.5 h-3.5 text-amber-600" />
+                          <span>Preview Differences</span>
+                        </button>
+
+                        <button
+                          onClick={() => handleToggleIgnoreDuplicate(pair)}
+                          className={`flex items-center gap-1 px-3 py-1.5 border rounded-lg text-xs font-semibold shadow-2xs transition-colors cursor-pointer ${
+                            isIgnored
+                              ? 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-300'
+                              : 'bg-white hover:bg-slate-50 text-slate-600 border-slate-200'
+                          }`}
+                        >
+                          {isIgnored ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+                          <span>{isIgnored ? 'Restore' : 'Ignore'}</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })()}
       </div>
 
       {/* Empty State when Scanned and 0 Relationships Detected */}
@@ -1131,6 +1526,292 @@ export const RelationshipManager = ({
               >
                 <GitMerge className={`w-3.5 h-3.5 ${applyingJoin ? 'animate-spin' : ''}`} />
                 <span>{applyingJoin ? 'Creating Joined Dataset...' : 'Confirm and Apply Join'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* ---------------- MODAL 1: VIEW DETAILED COMPARISON ---------------- */}
+      {comparisonModalPair && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[85vh] flex flex-col shadow-2xl border border-[#CBD5E1] overflow-hidden">
+            {/* Modal Header */}
+            <div className="px-6 py-4 border-b border-[#E2E8F0] flex items-center justify-between shrink-0 bg-[#F8FAFC]">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-blue-50 border border-blue-200 text-[#2563EB]">
+                  <FileSearch className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-[#0F172A] flex items-center gap-2">
+                    <span>Detailed Dataset Comparison</span>
+                    <span
+                      className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                        comparisonModalPair.status === 'EXACT_DUPLICATE'
+                          ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                          : comparisonModalPair.status === 'POTENTIAL_DUPLICATE'
+                          ? 'bg-amber-100 text-amber-800 border-amber-300'
+                          : 'bg-blue-100 text-blue-800 border-blue-300'
+                      }`}
+                    >
+                      {comparisonModalPair.status_label || comparisonModalPair.status}
+                    </span>
+                  </h3>
+                  <p className="text-xs text-[#64748B] mt-0.5 font-mono">
+                    Pair ID: {comparisonModalPair.id}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setComparisonModalPair(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-6 overflow-y-auto space-y-5 text-xs">
+              {/* Datasets Comparison Grid */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="p-3.5 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] space-y-1">
+                  <div className="text-[10px] font-bold text-[#64748B] uppercase">Dataset 1</div>
+                  <div className="font-bold text-[#0F172A] truncate" title={comparisonModalPair.dataset1_name}>
+                    {comparisonModalPair.dataset1_name}
+                  </div>
+                  <div className="text-[11px] text-[#64748B] font-mono">
+                    ID #{comparisonModalPair.dataset1_id} · {comparisonModalPair.dataset1_rows} rows · {comparisonModalPair.dataset1_columns} cols
+                  </div>
+                </div>
+
+                <div className="p-3.5 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] space-y-1">
+                  <div className="text-[10px] font-bold text-[#64748B] uppercase">Dataset 2</div>
+                  <div className="font-bold text-[#0F172A] truncate" title={comparisonModalPair.dataset2_name}>
+                    {comparisonModalPair.dataset2_name}
+                  </div>
+                  <div className="text-[11px] text-[#64748B] font-mono">
+                    ID #{comparisonModalPair.dataset2_id} · {comparisonModalPair.dataset2_rows} rows · {comparisonModalPair.dataset2_columns} cols
+                  </div>
+                </div>
+              </div>
+
+              {/* Exact Formula & Metrics Breakdown */}
+              <div className="p-4 rounded-xl bg-blue-50/60 border border-blue-200 space-y-2 text-blue-900">
+                <div className="font-bold text-xs flex items-center gap-1.5">
+                  <Info className="w-4 h-4 text-blue-600" />
+                  <span>Overlap Percentage Calculation Method:</span>
+                </div>
+                <div className="font-mono text-[11px] bg-white p-2.5 rounded-lg border border-blue-200">
+                  {comparisonModalPair.calculation_method ||
+                    `Overlap % = 2 × Matching Records (${comparisonModalPair.matching_records_count}) / (${comparisonModalPair.dataset1_rows} + ${comparisonModalPair.dataset2_rows}) = ${comparisonModalPair.overlap_pct}%`}
+                </div>
+                <ul className="list-disc pl-5 text-[11px] space-y-1 text-blue-800">
+                  <li>
+                    <strong>Safe normalization applied:</strong> Case-insensitive and whitespace-trimmed column matching without altering source cell values.
+                  </li>
+                  <li>
+                    <strong>Multiplicity preservation:</strong> Repeated records must occur with matching frequencies in both datasets to qualify as an Exact Duplicate.
+                  </li>
+                  <li>
+                    <strong>Invariance:</strong> Row ordering and column ordering differences are recognized and safely handled.
+                  </li>
+                </ul>
+              </div>
+
+              {/* Logical Column Mapping */}
+              {comparisonModalPair.column_mapping && Object.keys(comparisonModalPair.column_mapping).length > 0 && (
+                <div className="space-y-2">
+                  <div className="text-[11px] font-bold text-[#475569] uppercase tracking-wider">
+                    Logical Column Alignment ({Object.keys(comparisonModalPair.column_mapping).length} Matched Columns)
+                  </div>
+                  <div className="border border-[#E2E8F0] rounded-xl overflow-hidden max-h-40 overflow-y-auto">
+                    <table className="w-full text-left text-xs border-collapse">
+                      <thead className="bg-[#F8FAFC] border-b border-[#E2E8F0] text-[10px] text-[#475569] font-bold uppercase sticky top-0">
+                        <tr>
+                          <th className="py-2 px-3">Dataset 1 Column</th>
+                          <th className="py-2 px-3 text-center">↔</th>
+                          <th className="py-2 px-3">Dataset 2 Column</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#E2E8F0]">
+                        {Object.entries(comparisonModalPair.column_mapping).map(([col1, col2], idx) => (
+                          <tr key={idx} className="hover:bg-[#F8FAFC]">
+                            <td className="py-1.5 px-3 font-mono text-[11px] text-[#0F172A]">{col1}</td>
+                            <td className="py-1.5 px-3 text-center text-slate-400">↔</td>
+                            <td className="py-1.5 px-3 font-mono text-[11px] text-[#2563EB]">{col2}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* Detected Differences */}
+              {comparisonModalPair.differences && comparisonModalPair.differences.length > 0 && (
+                <div className="space-y-1.5">
+                  <div className="text-[11px] font-bold text-[#475569] uppercase tracking-wider">
+                    Detected Differences
+                  </div>
+                  <ul className="list-disc pl-5 space-y-1 text-[11px] text-[#475569]">
+                    {comparisonModalPair.differences.map((d, i) => (
+                      <li key={i}>{d}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Safety Confirmation Notice */}
+              <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11px] flex items-center gap-2">
+                <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>
+                  <strong>Strict Safeguard:</strong> This comparison is strictly read-only. Datasets are never automatically deleted, overwritten, or modified.
+                </span>
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="px-6 py-3 border-t border-[#E2E8F0] flex items-center justify-end shrink-0 bg-[#F8FAFC]">
+              <button
+                onClick={() => setComparisonModalPair(null)}
+                className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-semibold cursor-pointer"
+              >
+                Close Comparison
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---------------- MODAL 2: PREVIEW DIFFERENCES ---------------- */}
+      {differencesModalPair && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl max-w-3xl w-full max-h-[85vh] flex flex-col shadow-2xl border border-[#CBD5E1] overflow-hidden">
+            {/* Modal Header */}
+            <div className="px-6 py-4 border-b border-[#E2E8F0] flex items-center justify-between shrink-0 bg-[#F8FAFC]">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-amber-50 border border-amber-200 text-amber-600">
+                  <Split className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-[#0F172A]">
+                    Preview Differing Records
+                  </h3>
+                  <p className="text-xs text-[#64748B] mt-0.5">
+                    Records unique to each dataset (sample of up to 10 rows shown)
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setDifferencesModalPair(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Tab Switcher: Dataset 1 vs Dataset 2 */}
+            <div className="px-6 pt-3 border-b border-[#E2E8F0] flex items-center gap-3 text-xs bg-slate-50/50">
+              <button
+                onClick={() => setDifferencesActiveTab(1)}
+                className={`pb-2.5 font-semibold transition-colors cursor-pointer border-b-2 ${
+                  differencesActiveTab === 1
+                    ? 'border-[#2563EB] text-[#2563EB]'
+                    : 'border-transparent text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                Unique to {differencesModalPair.dataset1_name} ({differencesModalPair.unique_records_dataset1_count} records)
+              </button>
+              <button
+                onClick={() => setDifferencesActiveTab(2)}
+                className={`pb-2.5 font-semibold transition-colors cursor-pointer border-b-2 ${
+                  differencesActiveTab === 2
+                    ? 'border-[#2563EB] text-[#2563EB]'
+                    : 'border-transparent text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                Unique to {differencesModalPair.dataset2_name} ({differencesModalPair.unique_records_dataset2_count} records)
+              </button>
+            </div>
+
+            {/* Modal Content Table */}
+            <div className="p-6 overflow-y-auto space-y-4 text-xs">
+              {(() => {
+                const rows =
+                  differencesActiveTab === 1
+                    ? differencesModalPair.sample_differences_dataset1 || []
+                    : differencesModalPair.sample_differences_dataset2 || [];
+
+                const count =
+                  differencesActiveTab === 1
+                    ? differencesModalPair.unique_records_dataset1_count
+                    : differencesModalPair.unique_records_dataset2_count;
+
+                if (count === 0 || rows.length === 0) {
+                  return (
+                    <div className="p-8 text-center border border-dashed border-slate-200 rounded-xl space-y-1.5 text-xs text-[#64748B]">
+                      <CheckCircle2 className="w-7 h-7 text-emerald-600 mx-auto" />
+                      <div className="font-bold text-[#0F172A]">No Differing Records</div>
+                      <p className="text-[11px]">
+                        All records in this dataset are matched in the other dataset.
+                      </p>
+                    </div>
+                  );
+                }
+
+                const columns = Object.keys(rows[0] || {});
+
+                return (
+                  <div className="space-y-2">
+                    <div className="text-[11px] text-[#64748B] flex items-center justify-between">
+                      <span>Showing {rows.length} of {count} unique row(s):</span>
+                    </div>
+                    <div className="border border-[#E2E8F0] rounded-xl overflow-x-auto max-h-64">
+                      <table className="w-full text-left text-xs border-collapse">
+                        <thead className="bg-[#F8FAFC] border-b border-[#E2E8F0] text-[10px] text-[#475569] font-bold uppercase sticky top-0">
+                          <tr>
+                            <th className="py-2 px-3 bg-[#F8FAFC]">#</th>
+                            {columns.map((c) => (
+                              <th key={c} className="py-2 px-3 whitespace-nowrap bg-[#F8FAFC]">
+                                {c}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-[#E2E8F0]">
+                          {rows.map((row, idx) => (
+                            <tr key={idx} className="hover:bg-[#F8FAFC]">
+                              <td className="py-1.5 px-3 text-[10px] text-slate-400 font-mono">
+                                {idx + 1}
+                              </td>
+                              {columns.map((col) => (
+                                <td
+                                  key={col}
+                                  className="py-1.5 px-3 font-mono text-[11px] text-[#0F172A] whitespace-nowrap"
+                                >
+                                  {row[col] !== null && row[col] !== undefined ? (
+                                    String(row[col])
+                                  ) : (
+                                    <span className="text-slate-400 italic">null</span>
+                                  )}
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="px-6 py-3 border-t border-[#E2E8F0] flex items-center justify-end shrink-0 bg-[#F8FAFC]">
+              <button
+                onClick={() => setDifferencesModalPair(null)}
+                className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-semibold cursor-pointer"
+              >
+                Close Preview
               </button>
             </div>
           </div>

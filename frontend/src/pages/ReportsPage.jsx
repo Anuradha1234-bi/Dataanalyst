@@ -21,6 +21,7 @@ import {
 import { datasetService } from '../services/datasetService';
 import { analyticsService } from '../services/analyticsService';
 import { extractErrorMessage } from '../services/api';
+import { AnalyticalChart } from '../components/AnalyticalChart';
 
 export const ReportsPage = () => {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -163,7 +164,7 @@ export const ReportsPage = () => {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="max-w-7xl mx-auto w-full min-w-0 space-y-6">
       {/* Top Header */}
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-white border border-[#E2E8F0] rounded-2xl p-5 shadow-xs">
         <div className="flex items-center gap-3">
@@ -449,6 +450,35 @@ export const ReportsPage = () => {
                 <TableIcon className="w-4 h-4 text-[#2563EB]" />
                 <span>2. Numerical Attribute Statistics & Outlier Bounds</span>
               </h3>
+
+              {/* Real Feature Means Comparison Chart */}
+              {(() => {
+                const stats = report.statistics.column_stats || {};
+                const points = Object.entries(stats)
+                  .filter(([_, s]) => typeof s.mean === 'number' && !isNaN(s.mean))
+                  .slice(0, 8)
+                  .map(([col, s]) => ({
+                    label: col,
+                    value: parseFloat(s.mean.toFixed(2)),
+                  }));
+
+                if (points.length === 0) {
+                  return null;
+                }
+
+                return (
+                  <AnalyticalChart
+                    chartData={{
+                      recommended: true,
+                      chart_type: 'bar',
+                      title: 'Executive Feature Comparison (Calculated Mean Values)',
+                      x_axis_label: 'Numerical Attribute',
+                      data_points: points,
+                    }}
+                    emptyMessage="Insufficient data to generate this chart."
+                  />
+                );
+              })()}
 
               <div className="overflow-x-auto border border-[#E2E8F0] rounded-xl">
                 <table className="w-full text-left text-xs">

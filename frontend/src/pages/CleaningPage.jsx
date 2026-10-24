@@ -42,6 +42,7 @@ import { RelationshipManager } from '../components/RelationshipManager';
 import { datasetService } from '../services/datasetService';
 import { cleaningService } from '../services/cleaningService';
 import { extractErrorMessage } from '../services/api';
+import { AnalyticalChart } from '../components/AnalyticalChart';
 
 export const CleaningPage = () => {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -668,7 +669,7 @@ export const CleaningPage = () => {
   }, [loadingAction, workflowStep, error, downloadSuccess, overview?.has_cleaned]);
 
   const cleaningScore = useMemo(() => {
-    return validationReport?.cleaning_score ?? dashboardSummary?.quality_score ?? (overview?.has_cleaned ? 85 : 50);
+    return validationReport?.cleaning_score ?? dashboardSummary?.cleaning_score ?? dashboardSummary?.quality_score ?? (overview?.has_cleaned ? 85 : 50);
   }, [validationReport, dashboardSummary, overview]);
 
   const scoreStatus = useMemo(() => {
@@ -1139,7 +1140,7 @@ export const CleaningPage = () => {
   };
 
   return (
-    <div className="space-y-5 max-w-7xl mx-auto">
+    <div className="max-w-7xl mx-auto w-full min-w-0 space-y-6">
       {/* 1. Header & Dataset Selector */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 pb-4 border-b border-[#E2E8F0]">
         <div>
@@ -2349,6 +2350,82 @@ export const CleaningPage = () => {
                       </button>
                     </div>
                   </div>
+
+                  {/* Real CSV Before vs After Cleaning Comparison Chart */}
+                  {overview.has_cleaned && overview.cleaned_metrics && (
+                    <div className="pt-3 border-t border-[#F1F5F9]">
+                      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                        {/* 1. Row Count Comparison */}
+                        <AnalyticalChart
+                          chartData={{
+                            recommended: true,
+                            chart_type: 'bar',
+                            title: 'Total Records (Before vs After)',
+                            x_axis_label: 'Dataset Version',
+                            data_points: [
+                              {
+                                label: 'Original',
+                                value: overview.original_metrics.total_rows ?? 0,
+                                color: '#4778E8',
+                              },
+                              {
+                                label: 'Cleaned',
+                                value: overview.cleaned_metrics.total_rows ?? 0,
+                                color: '#38A995',
+                              },
+                            ],
+                          }}
+                          emptyMessage="Insufficient data to generate this chart."
+                        />
+
+                        {/* 2. Missing Values Resolved Comparison */}
+                        <AnalyticalChart
+                          chartData={{
+                            recommended: true,
+                            chart_type: 'bar',
+                            title: 'Missing Cells (Before vs After)',
+                            x_axis_label: 'Dataset Version',
+                            data_points: [
+                              {
+                                label: 'Original',
+                                value: overview.original_metrics.missing_cells ?? 0,
+                                color: '#E97A62',
+                              },
+                              {
+                                label: 'Cleaned',
+                                value: overview.cleaned_metrics.missing_cells ?? 0,
+                                color: '#38A995',
+                              },
+                            ],
+                          }}
+                          emptyMessage="Insufficient data to generate this chart."
+                        />
+
+                        {/* 3. Duplicate Rows Removed Comparison */}
+                        <AnalyticalChart
+                          chartData={{
+                            recommended: true,
+                            chart_type: 'bar',
+                            title: 'Duplicates (Before vs After)',
+                            x_axis_label: 'Dataset Version',
+                            data_points: [
+                              {
+                                label: 'Original',
+                                value: overview.original_metrics.duplicate_rows ?? 0,
+                                color: '#E97A62',
+                              },
+                              {
+                                label: 'Cleaned',
+                                value: overview.cleaned_metrics.duplicate_rows ?? 0,
+                                color: '#38A995',
+                              },
+                            ],
+                          }}
+                          emptyMessage="Insufficient data to generate this chart."
+                        />
+                      </div>
+                    </div>
+                  )}
 
                   {/* Cleaned Dataset Preview */}
                   {showCleanedPreview && overview.cleaned_sample_preview && (

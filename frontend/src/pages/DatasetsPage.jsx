@@ -20,6 +20,7 @@ import {
   CheckSquare,
   Square,
   Activity,
+  BarChart3,
 } from 'lucide-react';
 import { datasetService } from '../services/datasetService';
 import { extractErrorMessage } from '../services/api';
@@ -128,12 +129,12 @@ export const DatasetsPage = () => {
   };
 
   return (
-    <div className="max-w-6xl mx-auto space-y-6">
+    <div className="max-w-7xl mx-auto w-full min-w-0 space-y-6">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-xl font-bold text-[#0F172A]">My Datasets</h1>
-          <p className="text-xs text-[#64748B] mt-1">
+          <h1 className="text-xl sm:text-2xl font-extrabold text-[#111827] dark:text-white">My Datasets</h1>
+          <p className="text-xs text-[#64748B] dark:text-slate-400 mt-1">
             Manage your uploaded tabular files, inspect schema metadata, and export data.
           </p>
         </div>
@@ -141,7 +142,7 @@ export const DatasetsPage = () => {
         <div className="flex items-center gap-3">
           <button
             onClick={() => navigate('/upload')}
-            className="flex items-center gap-2 px-4 py-2.5 bg-[#2563EB] hover:bg-[#1D4ED8] text-white text-xs font-semibold rounded-xl shadow-xs transition-colors cursor-pointer"
+            className="flex items-center gap-2 px-4 py-2.5 bg-[#059669] hover:bg-[#047857] text-white text-xs font-semibold rounded-xl shadow-xs hover:shadow transition-all cursor-pointer"
           >
             <Plus className="w-4 h-4" />
             <span>Upload Dataset</span>
@@ -167,7 +168,7 @@ export const DatasetsPage = () => {
 
       {/* Search and Filters Bar (when datasets exist) */}
       {!isLoading && datasets.length > 0 && (
-        <div className="flex items-center justify-between gap-4 bg-white border border-[#E2E8F0] rounded-xl px-4 py-2.5 shadow-xs">
+        <div className="flex items-center justify-between gap-4 bg-white dark:bg-slate-900 border border-[#E2E8F0] dark:border-slate-800 rounded-xl px-4 py-2.5 shadow-xs">
           <div className="flex items-center gap-2 flex-1 max-w-sm">
             <Search className="w-4 h-4 text-[#94A3B8]" />
             <input
@@ -175,18 +176,18 @@ export const DatasetsPage = () => {
               placeholder="Search datasets by filename..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="text-xs text-[#0F172A] placeholder-[#94A3B8] focus:outline-none w-full bg-transparent"
+              className="text-xs text-[#111827] dark:text-white placeholder-[#94A3B8] focus:outline-none w-full bg-transparent"
             />
             {searchQuery && (
               <button
                 onClick={() => setSearchQuery('')}
-                className="text-[#94A3B8] hover:text-[#0F172A]"
+                className="text-[#94A3B8] hover:text-[#111827] dark:hover:text-white"
               >
                 <X className="w-3.5 h-3.5" />
               </button>
             )}
           </div>
-          <div className="text-xs font-medium text-[#64748B]">
+          <div className="text-xs font-medium text-[#64748B] dark:text-slate-400">
             Showing {filteredDatasets.length} of {datasets.length} {datasets.length === 1 ? 'dataset' : 'datasets'}
           </div>
         </div>
@@ -194,22 +195,22 @@ export const DatasetsPage = () => {
 
       {/* Multi-Selection Bulk Action Banner */}
       {!isLoading && selectedIds.length > 0 && (
-        <div className="bg-[#EFF6FF] border border-[#BFDBFE] rounded-xl px-4 py-2.5 flex items-center justify-between shadow-2xs">
-          <div className="flex items-center gap-2 text-xs font-semibold text-[#1D4ED8]">
-            <CheckSquare className="w-4 h-4 text-[#2563EB]" />
+        <div className="bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-900/60 rounded-xl px-4 py-2.5 flex items-center justify-between shadow-2xs">
+          <div className="flex items-center gap-2 text-xs font-semibold text-[#064E3B] dark:text-emerald-300">
+            <CheckSquare className="w-4 h-4 text-[#059669]" />
             <span>{selectedIds.length} dataset{selectedIds.length > 1 ? 's' : ''} selected</span>
           </div>
           <div className="flex items-center gap-2">
             <button
               onClick={() => navigate(`/profiling?dataset_ids=${selectedIds.join(',')}`)}
-              className="flex items-center gap-1.5 px-3.5 py-1.5 bg-[#2563EB] hover:bg-[#1D4ED8] text-white text-xs font-semibold rounded-lg shadow-2xs cursor-pointer transition-colors"
+              className="flex items-center gap-1.5 px-3.5 py-1.5 bg-[#059669] hover:bg-[#047857] text-white text-xs font-semibold rounded-lg shadow-2xs cursor-pointer transition-colors"
             >
               <Activity className="w-3.5 h-3.5" />
               <span>Analyze Together ({selectedIds.length})</span>
             </button>
             <button
               onClick={() => setSelectedIds([])}
-              className="text-xs text-[#64748B] hover:text-[#0F172A] px-2 py-1 cursor-pointer font-medium"
+              className="text-xs text-[#64748B] hover:text-[#111827] dark:hover:text-white px-2 py-1 cursor-pointer font-medium"
             >
               Clear
             </button>
@@ -219,26 +220,26 @@ export const DatasetsPage = () => {
 
       {/* Loading State */}
       {isLoading && (
-        <div className="bg-white border border-[#E2E8F0] rounded-2xl p-16 text-center shadow-xs">
-          <RefreshCw className="w-8 h-8 text-[#2563EB] animate-spin mx-auto mb-3" />
-          <h3 className="text-sm font-semibold text-[#0F172A]">Loading datasets...</h3>
-          <p className="text-xs text-[#64748B] mt-1">Retrieving your private dataset repository</p>
+        <div className="bg-white dark:bg-slate-900 border border-[#E2E8F0] dark:border-slate-800 rounded-2xl p-16 text-center shadow-xs">
+          <RefreshCw className="w-8 h-8 text-[#059669] animate-spin mx-auto mb-3" />
+          <h3 className="text-sm font-semibold text-[#111827] dark:text-white">Loading datasets...</h3>
+          <p className="text-xs text-[#64748B] dark:text-slate-400 mt-1">Retrieving your private dataset repository</p>
         </div>
       )}
 
       {/* Empty State */}
       {!isLoading && datasets.length === 0 && (
-        <div className="bg-white border border-[#E2E8F0] rounded-2xl p-14 text-center shadow-xs">
-          <div className="w-14 h-14 rounded-2xl bg-[#EFF6FF] text-[#2563EB] flex items-center justify-center mx-auto mb-4">
+        <div className="bg-white dark:bg-slate-900 border border-[#E2E8F0] dark:border-slate-800 rounded-2xl p-14 text-center shadow-xs">
+          <div className="w-14 h-14 rounded-2xl bg-emerald-50 dark:bg-emerald-950/60 text-[#059669] flex items-center justify-center mx-auto mb-4">
             <Database className="w-7 h-7" />
           </div>
-          <h3 className="text-base font-bold text-[#0F172A]">No datasets yet.</h3>
-          <p className="text-xs text-[#64748B] max-w-md mx-auto mt-2 leading-relaxed">
+          <h3 className="text-base font-bold text-[#111827] dark:text-white">No datasets yet.</h3>
+          <p className="text-xs text-[#64748B] dark:text-slate-400 max-w-md mx-auto mt-2 leading-relaxed">
             Upload your first CSV or Excel file to start analyzing your data.
           </p>
           <button
             onClick={() => navigate('/upload')}
-            className="mt-6 inline-flex items-center gap-2 px-5 py-2.5 bg-[#2563EB] hover:bg-[#1D4ED8] text-white text-xs font-semibold rounded-xl shadow-xs transition-colors cursor-pointer"
+            className="mt-6 inline-flex items-center gap-2 px-5 py-2.5 bg-[#059669] hover:bg-[#047857] text-white text-xs font-semibold rounded-xl shadow-xs transition-colors cursor-pointer"
           >
             <Plus className="w-4 h-4" />
             <span>Upload Dataset</span>
@@ -391,6 +392,19 @@ export const DatasetsPage = () => {
                             >
                               <ShieldCheck className="w-3.5 h-3.5" />
                               <span>Quality</span>
+                            </button>
+
+                            {/* Visualize */}
+                            <button
+                              onClick={() => {
+                                localStorage.setItem('selected_dataset_id', String(dataset.id));
+                                navigate(`/visualize?dataset_id=${dataset.id}`);
+                              }}
+                              className="px-2 py-1 text-xs font-semibold text-[#7C3AED] hover:bg-purple-50 dark:hover:bg-purple-950/40 rounded-lg transition-colors cursor-pointer inline-flex items-center gap-1"
+                              title="Visualize dataset"
+                            >
+                              <BarChart3 className="w-3.5 h-3.5" />
+                              <span>Visualize</span>
                             </button>
 
                             {/* Download */}
@@ -570,6 +584,16 @@ export const DatasetsPage = () => {
                 >
                   <FileSearch className="w-3.5 h-3.5" />
                   <span>Profile Dataset</span>
+                </button>
+                <button
+                  onClick={() => {
+                    localStorage.setItem('selected_dataset_id', String(selectedDataset.id));
+                    navigate(`/visualize?dataset_id=${selectedDataset.id}`);
+                  }}
+                  className="flex items-center gap-1.5 px-3.5 py-1.5 bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/40 dark:hover:bg-purple-900/60 text-xs font-semibold text-[#7C3AED] dark:text-purple-300 rounded-lg transition-colors cursor-pointer border border-purple-200 dark:border-purple-800"
+                >
+                  <BarChart3 className="w-3.5 h-3.5" />
+                  <span>Visualize</span>
                 </button>
                 <button
                   onClick={() => setSelectedDataset(null)}

@@ -53,7 +53,7 @@ export function AdminUsers() {
   }
 
   return (
-    <div className="page-container admin-page">
+    <div className="w-full min-w-0 space-y-6 admin-page">
       <div className="admin-header-row">
         <div>
           <h1 className="admin-title">User Management</h1>

@@ -189,18 +189,32 @@ class PredictionEngine:
             lags = fc_cfg.get("lags", [1, 2, 3, 7, 14, 30])
             windows = fc_cfg.get("rolling_windows", [7, 14, 30])
 
-            candidate_results, best_model_id, future_preds, y_val_t, y_val_p, future_dates, best_estimator = (
-                ForecastingEngine.train_and_forecast(
-                    df=df_work,
-                    date_col=date_col,
-                    target_col=target_col,
-                    horizon=horizon,
-                    test_size=test_size,
-                    lags=lags,
-                    rolling_windows=windows,
-                    enabled_models=enabled_models,
-                )
+            fc_res = ForecastingEngine.train_and_forecast(
+                df=df_work,
+                date_col=date_col,
+                target_col=target_col,
+                horizon=horizon,
+                test_size=test_size,
+                lags=lags,
+                rolling_windows=windows,
+                enabled_models=enabled_models,
             )
+            candidate_results, best_model_id, future_preds, y_val_t, y_val_p, future_dates, best_estimator = fc_res[:7]
+            val_dates = fc_res[7] if len(fc_res) > 7 else [f"val_{i}" for i in range(len(y_val_t))]
+
+            validation_points = []
+            for d, yt, yp in zip(val_dates, y_val_t, y_val_p):
+                abs_err = round(float(abs(yt - yp)), 4)
+                pct_err = round(float(abs_err / abs(yt) * 100.0), 2) if abs(yt) > 1e-9 else None
+                validation_points.append(
+                    PredictionPoint(
+                        index_or_date=str(d),
+                        actual_value=round(float(yt), 4),
+                        predicted_value=round(float(yp), 4),
+                        absolute_error=abs_err,
+                        percentage_error=pct_err,
+                    )
+                )
 
             report_stage("Calculating empirical uncertainty intervals...", 75)
             lowers, uppers, uncert_desc = UncertaintyService.calculate_regression_intervals(
@@ -257,6 +271,7 @@ class PredictionEngine:
                 model_results=candidate_results,
                 best_metrics=best_candidate.metrics,
                 predictions=prediction_points,
+                validation_predictions=validation_points,
                 feature_importance=importance_items,
                 features_used=features_used or ["historical_lags", "rolling_statistics", "calendar_trend"],
                 features_excluded=features_excluded,

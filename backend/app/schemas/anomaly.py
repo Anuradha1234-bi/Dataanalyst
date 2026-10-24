@@ -35,6 +35,10 @@ class AnomalyDetectRequest(BaseModel):
         default=42,
         description="Random seed for Isolation Forest reproducibility."
     )
+    exclude_duplicates: bool = Field(
+        default=True,
+        description="Exclude exact duplicate numerical columns from multivariate model input."
+    )
 
 
 class IQROutlierColumnResponse(BaseModel):
@@ -52,7 +56,10 @@ class IQROutlierColumnResponse(BaseModel):
     outlier_pct: float
     outlier_indices: List[Any] = Field(default_factory=list)
     min_val: float
-    max_val: float
+    valid_count: int = 0
+    missing_count: int = 0
+    total_rows: int = 0
+    evaluation_note: Optional[str] = None
 
 
 class IQRDetectionResponse(BaseModel):
@@ -63,6 +70,7 @@ class IQRDetectionResponse(BaseModel):
     outlier_rate: float = 0.0
     all_outlier_indices: List[Any] = Field(default_factory=list)
     multiplier: float = 1.5
+    duplicate_columns: Dict[str, List[str]] = Field(default_factory=dict)
 
 
 class IsolationForestDetectionResponse(BaseModel):
@@ -102,6 +110,12 @@ class AnomalySummaryResponse(BaseModel):
     dataset_id: int
     dataset_name: str
     dataset_version: str
+    iqr_unique_records: Optional[int] = 0
+    isolation_forest_unique_records: Optional[int] = 0
+    both_methods_records: Optional[int] = 0
+    iqr_only_records: Optional[int] = 0
+    isolation_forest_only_records: Optional[int] = 0
+    duplicate_columns: Dict[str, List[str]] = Field(default_factory=dict)
 
 
 class AnomalyDetectResponse(BaseModel):
@@ -112,6 +126,7 @@ class AnomalyDetectResponse(BaseModel):
     isolation_forest_results: Optional[IsolationForestDetectionResponse] = None
     flagged_records: List[FlaggedRecordItem] = Field(default_factory=list)
     all_numeric_columns: List[str] = Field(default_factory=list)
+    duplicate_columns: Dict[str, List[str]] = Field(default_factory=dict)
     warnings: List[str] = Field(default_factory=list)
     created_at: str
 
@@ -124,3 +139,4 @@ class NumericColumnsResponse(BaseModel):
     total_rows: int
     suitable_numeric_columns: List[str] = Field(default_factory=list)
     excluded_columns: List[str] = Field(default_factory=list)
+    duplicate_columns: Dict[str, List[str]] = Field(default_factory=dict)

@@ -13,6 +13,8 @@ from app.routers.reports import router as reports_router
 from app.routers.analytics import router as analytics_router
 from app.routers.settings import router as settings_router
 from app.api.routes.users import router as users_router
+from app.routers.support import router as support_router
+from app.routers.feedback import router as feedback_router
 
 __all__ = [
     "auth_router",
@@ -28,4 +30,6 @@ __all__ = [
     "analytics_router",
     "settings_router",
     "users_router",
+    "support_router",
+    "feedback_router",
 ]

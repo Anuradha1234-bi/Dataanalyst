@@ -10,7 +10,7 @@ Inspects dataset schemas, join history, and column name structures to determine:
 - Readable clarification labels
 """
 
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional,Union, Tuple
 from dataclasses import dataclass, field, asdict
 import re
 from pathlib import Path
@@ -176,17 +176,17 @@ def inspect_column_lineage(
         if is_join:
             desc = "Join-generated column from dataset join"
             if src_ds:
-                label = f"{col_str} — Joined {src_ds} column"
+                label = f"{col_str} - Joined {src_ds} column"
             else:
-                label = f"{col_str} — Joined column (Source information unavailable)"
+                label = f"{col_str} - Joined column (Source information unavailable)"
         else:
             desc = "Original column from base dataset"
             if src_ds and source_right:  # We are in a joined dataset with verified source names
-                label = f"{col_str} — Original {src_ds} column"
+                label = f"{col_str} - Original {src_ds} column"
             elif src_ds:
-                label = f"{col_str} — Dataset column ({src_ds})"
+                label = f"{col_str} - Dataset column ({src_ds})"
             else:
-                label = f"{col_str} — Original column (Source information unavailable)"
+                label = f"{col_str} - Original column"
 
         lineage_map[col_str] = ColumnLineageInfo(
             actual_name=col_str,

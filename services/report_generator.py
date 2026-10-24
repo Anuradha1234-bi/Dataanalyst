@@ -802,11 +802,18 @@ class ReportGeneratorService:
         ds_anomalies = all_anomalies.get(active_name) or SessionManager.get_anomaly_results(active_name)
         if ds_anomalies and isinstance(ds_anomalies, dict):
             methods_list: List[AnomalyMethodResult] = []
-            tot_anom = 0
+            unique_anom_indices = set()
+            has_indices = False
+            fallback_tot = 0
+
             if "iqr" in ds_anomalies:
                 iqr_r = ds_anomalies["iqr"]
                 cnt = int(getattr(iqr_r, "total_outlier_rows", 0))
-                tot_anom += cnt
+                fallback_tot = max(fallback_tot, cnt)
+                iqr_idxs = getattr(iqr_r, "all_outlier_indices", None)
+                if iqr_idxs is not None:
+                    unique_anom_indices.update(iqr_idxs)
+                    has_indices = True
                 methods_list.append(
                     AnomalyMethodResult(
                         method=f"IQR Outlier Detection ({getattr(iqr_r, 'multiplier', 1.5)}×)",
@@ -819,7 +826,11 @@ class ReportGeneratorService:
             if "isolation_forest" in ds_anomalies:
                 if_r = ds_anomalies["isolation_forest"]
                 cnt = int(getattr(if_r, "anomaly_count", 0))
-                tot_anom += cnt
+                fallback_tot = max(fallback_tot, cnt)
+                if_idxs = getattr(if_r, "anomaly_indices", None)
+                if if_idxs is not None:
+                    unique_anom_indices.update(if_idxs)
+                    has_indices = True
                 methods_list.append(
                     AnomalyMethodResult(
                         method="Isolation Forest (Unsupervised)",
@@ -832,7 +843,11 @@ class ReportGeneratorService:
             if "multivariate" in ds_anomalies:
                 mv_r = ds_anomalies["multivariate"]
                 cnt = int(getattr(mv_r, "anomaly_count", 0))
-                tot_anom += cnt
+                fallback_tot = max(fallback_tot, cnt)
+                mv_idxs = getattr(mv_r, "all_anomaly_indices", None)
+                if mv_idxs is not None:
+                    unique_anom_indices.update(mv_idxs)
+                    has_indices = True
                 methods_list.append(
                     AnomalyMethodResult(
                         method="Multivariate Relationship Analysis",
@@ -842,6 +857,8 @@ class ReportGeneratorService:
                         details="Joint feature covariance analysis",
                     )
                 )
+
+            tot_anom = len(unique_anom_indices) if has_indices else fallback_tot
 
             treatment_str = None
             if "last_treatment" in ds_anomalies:

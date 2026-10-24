@@ -58,3 +58,12 @@ def init_db() -> None:
             except Exception:
                 pass
 
+            try:
+                result = conn.execute(text("PRAGMA table_info(prediction_runs)"))
+                cols = [row[1] for row in result.fetchall()]
+                if cols and "validation_predictions_json" not in cols:
+                    conn.execute(text("ALTER TABLE prediction_runs ADD COLUMN validation_predictions_json TEXT"))
+                    conn.commit()
+            except Exception:
+                pass
+

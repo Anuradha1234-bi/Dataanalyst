@@ -358,6 +358,35 @@ def test_time_series_forecasting():
     assert first_pt["upper_bound"] is not None
     assert first_pt["lower_bound"] <= first_pt["predicted_value"] <= first_pt["upper_bound"]
 
+    # 1. Validation predictions verification (Proposal 1)
+    assert "validation_predictions" in ts_data
+    val_preds = ts_data["validation_predictions"]
+    assert len(val_preds) == ts_data["validation_rows"]
+    assert len(val_preds) > 0
+    first_val = val_preds[0]
+    assert first_val["actual_value"] is not None
+    assert first_val["predicted_value"] is not None
+    assert first_val["absolute_error"] is not None
+    assert abs(first_val["absolute_error"] - abs(first_val["actual_value"] - first_val["predicted_value"])) < 1e-4
+    if abs(first_val["actual_value"]) > 1e-9:
+        assert first_val["percentage_error"] is not None
+
+    # 2. CSV Export check (must contain validation_holdout and future_forecast records)
+    run_id = ts_data["run_id"]
+    csv_resp = client.get(f"/api/prediction/runs/{run_id}/export/csv", headers=headers)
+    assert csv_resp.status_code == 200
+    csv_text = csv_resp.text
+    assert "validation_holdout" in csv_text
+    assert "future_forecast" in csv_text
+    assert "absolute_error" in csv_text
+
+    # 3. Report Export check (must contain Validation Holdout and Future Horizon sections)
+    report_resp = client.get(f"/api/prediction/runs/{run_id}/export/report", headers=headers)
+    assert report_resp.status_code == 200
+    report_text = report_resp.text
+    assert "Validation Holdout (Actual vs Predicted)" in report_text
+    assert "Future Horizon Projections" in report_text
+
     # History listing check
     history_resp = client.get("/api/prediction/runs", headers=headers)
     assert history_resp.status_code == 200
@@ -365,10 +394,47 @@ def test_time_series_forecasting():
     assert len(history) >= 3
 
     # Delete run
-    run_id = ts_data["run_id"]
     del_resp = client.delete(f"/api/prediction/runs/{run_id}", headers=headers)
     assert del_resp.status_code == 200
     assert del_resp.json()["status"] == "deleted"
+
+    db.close()
+
+
+def test_proposal_1_validation_holdout_and_zero_handling():
+    """Verify holdout validation records with zero actual values safely compute percentage error as None."""
+    db = TestingSessionLocal()
+    np.random.seed(42)
+    n = 60
+    dates = pd.date_range("2025-01-01", periods=n, freq="D")
+    vals = [10.0] * 48 + [0.0] * 6 + [20.0] * 6  # contains zero actual values in holdout
+    df_zero = pd.DataFrame({"order_date": dates.strftime("%Y-%m-%d"), "amount": vals})
+    ds = create_temp_dataset(db, "test_zero_handling.csv", df_zero)
+    headers = get_auth_headers()
+
+    train_resp = client.post(
+        "/api/prediction/train",
+        json={
+            "dataset_id": ds.id,
+            "target_column": "amount",
+            "date_column": "order_date",
+            "mode": "forecasting",
+            "forecast_horizon": 5,
+            "test_size": 0.20,
+        },
+        headers=headers,
+    )
+    assert train_resp.status_code == 200
+    data = train_resp.json()
+    assert "validation_predictions" in data
+    assert len(data["validation_predictions"]) == data["validation_rows"]
+
+    # Verify zero actual rows have percentage_error as None (N/A) without division error
+    zero_rows = [p for p in data["validation_predictions"] if p["actual_value"] == 0.0]
+    assert len(zero_rows) > 0
+    for zr in zero_rows:
+        assert zr["percentage_error"] is None
+        assert zr["absolute_error"] is not None
 
     db.close()
 

@@ -11,21 +11,78 @@ from difflib import SequenceMatcher
 from typing import Dict, Any, List, Optional, Union
 import re
 import pandas as pd
+import numpy as np
 
 from query.column_lineage import inspect_column_lineage, ColumnLineageInfo
+
+
+def are_columns_identical(s1: Optional[pd.Series], s2: Optional[pd.Series]) -> bool:
+    """Compare two pandas Series to determine whether their data and missing-value patterns are identical.
+
+    Contract:
+    - Never modifies columns or source data.
+    - Accurately checks length, null masks, numeric equivalence, and string equality.
+    """
+    if s1 is None or s2 is None:
+        return False
+    if len(s1) != len(s2):
+        return False
+    # Check null mask alignment
+    s1_na = s1.isna()
+    s2_na = s2.isna()
+    if not (s1_na == s2_na).all():
+        return False
+    # Both series are all null
+    if s1_na.all():
+        return True
+
+    # Check non-null values
+    v1 = s1[~s1_na]
+    v2 = s2[~s2_na]
+    if s1.equals(s2):
+        return True
+
+    # Numeric comparison with tolerance
+    try:
+        n1 = pd.to_numeric(v1, errors="coerce")
+        n2 = pd.to_numeric(v2, errors="coerce")
+        if n1.notna().all() and n2.notna().all():
+            return bool((n1 == n2).all() or np.isclose(n1.values, n2.values, equal_nan=True).all())
+    except Exception:
+        pass
+
+    # String comparison with whitespace stripping
+    try:
+        str1 = v1.astype(str).str.strip()
+        str2 = v2.astype(str).str.strip()
+        return bool((str1 == str2).all())
+    except Exception:
+        return False
+
 
 
 # Semantic synonyms commonly found in analytical tabular datasets
 SEMANTIC_SYNONYMS: Dict[str, List[str]] = {
     "price": ["cost", "rate", "amount", "modal_price", "min_price", "max_price", "value", "unit_price"],
-    "sales": ["revenue", "turnover", "income", "amount", "total_sales", "receipts"],
+    "sales": ["revenue", "turnover", "income", "amount", "total_sales", "receipts", "total_amount", "billing_amount_inr", "billing_amount", "money", "earnings", "sold", "sell", "orders", "sales_amount"],
+    "sales_amount": ["total_amount", "billing_amount_inr", "billing_amount", "sales", "revenue", "amount"],
+    "total_sales": ["total_amount", "billing_amount_inr", "billing_amount", "sales", "revenue", "amount"],
+    "revenue": ["sales", "turnover", "income", "amount", "total_sales", "receipts", "total_amount", "billing_amount_inr", "billing_amount", "money", "earnings", "make", "gross", "collections"],
+    "cost": ["expense", "expenditure", "spend", "spending", "price", "unit_cost", "charges"],
+    "spending": ["spend", "spent", "amount", "total_amount", "sales", "billing_amount_inr", "billing_amount", "expenditure"],
     "quantity": ["qty", "volume", "units", "count", "arrivals", "arrival_quantity", "stock"],
     "market": ["mandi", "bazaar", "location", "center", "city", "region", "district", "place"],
+    "region": ["market", "location", "zone", "territory", "area", "state", "city"],
     "commodity": ["product", "item", "crop", "good", "produce", "category"],
-    "date": ["time", "day", "timestamp", "period", "month", "year", "created_at", "transaction_date"],
-    "customer": ["client", "buyer", "user", "consumer", "account"],
-    "profit": ["margin", "gain", "earnings", "net_profit"],
+    "category": ["department", "product_category", "item_category", "commodity", "type", "class", "group", "sector", "segment"],
+    "product": ["commodity", "item", "good", "produce", "crop", "service", "sku"],
+    "date": ["time", "day", "timestamp", "period", "month", "year", "created_at", "transaction_date", "admission_date", "discharge_date"],
+    "customer": ["client", "buyer", "user", "consumer", "account", "customer_type", "customer_name", "patient", "student", "patron", "subscriber"],
+    "customer_type": ["customer", "client_type", "user_type", "type"],
+    "profit": ["margin", "gain", "net_profit"],
     "state": ["province", "region", "territory", "zone"],
+    "payment_method": ["payment", "payment_type", "payment_mode", "mode_of_payment", "transaction_type", "method_of_payment"],
+    "order": ["orders", "order_id", "transaction", "transaction_id", "invoice"],
 }
 
 # Extraction and system metadata patterns (PDF/OCR pagination, row/line offsets, system IDs)
@@ -42,6 +99,23 @@ EXTRACTION_METADATA_PATTERNS: List[str] = [
     r"^token[_\s]?(?:idx|index|id)",
 ]
 
+# Patterns for identifier columns (e.g. Order_ID, patient_id) that should not be used as default numeric metrics
+IDENTIFIER_PATTERNS: List[str] = [
+    r"^[a-zA-Z0-9_]*_?id$",
+    r"^[a-zA-Z0-9_]*_?code$",
+    r"^[a-zA-Z0-9_]*_?num$",
+    r"^[a-zA-Z0-9_]*_?number$",
+    r"^id$",
+    r"^uuid$",
+    r"^guid$",
+    r"^ssn$",
+    r"^patient[_\s]?id$",
+    r"^order[_\s]?id$",
+    r"^customer[_\s]?id$",
+    r"^user[_\s]?id$",
+    r"^invoice[_\s]?(?:num|number|id)?$",
+]
+
 # Conversational and analytical stopwords that must not fuzzy-match to column names
 RESOLVER_STOPWORDS = {
     "flagged", "failed", "passed", "case", "cases", "based", "criteria",
@@ -53,7 +127,20 @@ RESOLVER_STOPWORDS = {
     "row", "rows", "column", "columns", "feature", "features", "metric",
     "metrics", "stat", "stats", "statistic", "statistics", "first",
     "second", "third", "last", "any", "some", "none", "true", "false",
+    "contributed", "contribute", "contribution", "share", "percentage",
+    "proportion", "frequently", "frequent", "used", "most", "popular",
+    "dashboard", "showing", "compare", "comparison", "returning", "new",
 }
+
+def is_identifier_column(column_name: str) -> bool:
+    """Check if a column represents an identifier (e.g. Order_ID, patient_id) rather than a business metric."""
+    if not column_name:
+        return False
+    norm = re.sub(r"[^a-zA-Z0-9_]", "_", str(column_name).strip().lower())
+    for pattern in IDENTIFIER_PATTERNS:
+        if re.search(pattern, norm):
+            return True
+    return False
 
 
 def is_metadata_column(column_name: str) -> bool:
@@ -158,6 +245,11 @@ def resolve_column(
         }
 
     # Extract data types if available from metadata or DataFrame
+    if df is None and isinstance(dataset_metadata, dict):
+        df = dataset_metadata.get("_df")
+        if df is None:
+            df = dataset_metadata.get("df")
+
     dtypes: Dict[str, str] = {}
     if isinstance(dataset_metadata, dict) and "data_types" in dataset_metadata:
         dtypes = {str(k): str(v) for k, v in dataset_metadata["data_types"].items()}
@@ -172,19 +264,128 @@ def resolve_column(
     # -------------------------------------------------------------------------
     # STEP 1: Exact Column-Name Match (Case-Insensitive or Normalized)
     # -------------------------------------------------------------------------
-    exact_match: Optional[str] = None
+    matched_cols: List[str] = []
+
+    # 1. Exact case-insensitive match
     for col in columns:
         if col.lower() == req_lower:
-            exact_match = col
-            break
+            if col not in matched_cols:
+                matched_cols.append(col)
 
-    if not exact_match:
+    # 2. Normalized match (e.g. whitespace and underscores, e.g. "Order Amount INR" -> "Order_Amount_INR")
+    if not matched_cols:
         for col in columns:
             if _normalize_name(col) == norm_req:
-                exact_match = col
-                break
+                if col not in matched_cols:
+                    matched_cols.append(col)
 
-    if exact_match:
+    # 3. Check with analytical prefixes stripped (e.g. "total age" -> "age", "average billing" -> "billing")
+    if not matched_cols:
+        stripped_req = re.sub(r"^(total|sum\s+of|average|mean|median|maximum|max\s+of|minimum|min\s+of|count\s+of)\s+", "", req_lower).strip()
+        if stripped_req and stripped_req != req_lower:
+            norm_stripped = _normalize_name(stripped_req)
+            for col in columns:
+                if col.lower() == stripped_req or _normalize_name(col) == norm_stripped:
+                    if col not in matched_cols:
+                        matched_cols.append(col)
+
+    # 4. Check singular/plural variations (e.g. "patients" -> "patient_id")
+    if not matched_cols:
+        clean_base = re.sub(r"^(total|sum\s+of|average|mean|median|maximum|max\s+of|minimum|min\s+of|count\s+of)\s+", "", req_lower).strip()
+        if clean_base.endswith("s") and not clean_base.endswith("ss"):
+            sing = clean_base[:-1]
+            for col in columns:
+                c_low = col.lower()
+                if c_low == sing or c_low.startswith(sing + "_") or c_low.endswith("_" + sing):
+                    if col not in matched_cols:
+                        matched_cols.append(col)
+
+    # Multiple matching columns detected (e.g. 'age' and 'Age' or duplicate column names)
+    if len(matched_cols) > 1:
+        # Check if they are join-generated suffixed duplicates
+        suffixed = [
+            c for c in matched_cols
+            if lineage_map.get(c) and lineage_map[c].is_join_generated
+        ]
+        non_suffixed = [c for c in matched_cols if c not in suffixed]
+        if non_suffixed and len(non_suffixed) == 1:
+            exact_match = non_suffixed[0]
+            explanation = f"Selected primary column '{exact_match}' (preferred over join-generated duplicate '{suffixed[0]}')."
+            return {
+                "resolved": True,
+                "column": exact_match,
+                "confidence": 1.0,
+                "candidates": [{"column": exact_match, "score": 1.0, "match_type": "exact"}],
+                "is_ambiguous": False,
+                "clarification_options": [],
+                "clarification_candidates": [],
+                "selection_explanation": explanation,
+            }
+
+        # Compare actual cell values and missing-value patterns if DataFrame is available
+        if df is not None and all(c in df.columns for c in matched_cols):
+            all_identical = True
+            first_c = matched_cols[0]
+            for other_c in matched_cols[1:]:
+                if not are_columns_identical(df[first_c], df[other_c]):
+                    all_identical = False
+                    break
+
+            if all_identical:
+                # Safe resolution: all candidate columns contain identical contents
+                chosen = raw_req if raw_req in matched_cols else matched_cols[0]
+                explanation = (
+                    f"Detected equivalent columns {matched_cols} with identical values and missing-value patterns. "
+                    f"Resolved safely to '{chosen}' without modifying source data."
+                )
+                return {
+                    "resolved": True,
+                    "column": chosen,
+                    "confidence": 1.0,
+                    "candidates": [{"column": chosen, "score": 1.0, "match_type": "exact_equivalent"}],
+                    "is_ambiguous": False,
+                    "clarification_options": [],
+                    "clarification_candidates": [],
+                    "selection_explanation": explanation,
+                }
+            else:
+                # Different contents! Do not guess; request clarification
+                cand_info = []
+                for c in matched_cols:
+                    series = df[c]
+                    cand_info.append({
+                        "column": c,
+                        "data_type": dtypes.get(c, str(series.dtype)),
+                        "non_null_count": int(series.notna().sum()),
+                        "null_count": int(series.isna().sum()),
+                        "sample_values": [str(x) for x in series.dropna().head(3).tolist()],
+                    })
+                return {
+                    "resolved": False,
+                    "column": None,
+                    "confidence": 0.50,
+                    "candidates": [{"column": c, "score": 0.85, "match_type": "duplicate_conflict"} for c in matched_cols],
+                    "is_ambiguous": True,
+                    "clarification_options": matched_cols,
+                    "clarification_candidates": cand_info,
+                    "selection_explanation": f"Multiple columns match '{raw_req}' ({', '.join(matched_cols)}) with different values. Please specify which column to analyze.",
+                }
+        else:
+            # DataFrame not accessible to compare contents; prompt clarification
+            cand_info = [{"column": c, "data_type": dtypes.get(c, "unknown")} for c in matched_cols]
+            return {
+                "resolved": False,
+                "column": None,
+                "confidence": 0.50,
+                "candidates": [{"column": c, "score": 0.85, "match_type": "duplicate_conflict"} for c in matched_cols],
+                "is_ambiguous": True,
+                "clarification_options": matched_cols,
+                "clarification_candidates": cand_info,
+                "selection_explanation": f"Multiple columns match '{raw_req}' ({', '.join(matched_cols)}). Please specify which column to analyze.",
+            }
+
+    if len(matched_cols) == 1:
+        exact_match = matched_cols[0]
         # Check if there are join-generated suffixed duplicates of this exact match
         exact_lineage = lineage_map.get(exact_match)
         base = exact_lineage.base_name if exact_lineage else exact_match
@@ -210,6 +411,7 @@ def resolve_column(
             "clarification_candidates": [],
             "selection_explanation": explanation,
         }
+
 
     # -------------------------------------------------------------------------
     # STEP 2: Score Candidate Columns Semantically

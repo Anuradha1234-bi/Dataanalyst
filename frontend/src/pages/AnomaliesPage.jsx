@@ -20,6 +20,7 @@ import {
 import { datasetService } from '../services/datasetService';
 import { anomalyService } from '../services/anomalyService';
 import { extractErrorMessage } from '../services/api';
+import { AnalyticalChart } from '../components/AnalyticalChart';
 
 export const AnomaliesPage = () => {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -187,10 +188,14 @@ export const AnomaliesPage = () => {
     return results.flagged_records.filter((rec) => {
       // Method filter
       if (methodFilter !== 'ALL') {
-        const hasMethod = rec.methods.some((m) =>
-          m.toLowerCase().replace(/[^a-z]/g, '').includes(methodFilter.toLowerCase().replace(/[^a-z]/g, ''))
-        );
-        if (!hasMethod) return false;
+        const hasIqr = rec.methods.some((m) => m.toLowerCase().includes('iqr'));
+        const hasIf = rec.methods.some((m) => m.toLowerCase().includes('isolation'));
+
+        if (methodFilter === 'both' && !(hasIqr && hasIf)) return false;
+        if (methodFilter === 'iqr_only' && !(hasIqr && !hasIf)) return false;
+        if (methodFilter === 'if_only' && !(!hasIqr && hasIf)) return false;
+        if ((methodFilter === 'iqr_all' || methodFilter === 'iqr') && !hasIqr) return false;
+        if ((methodFilter === 'if_all' || methodFilter === 'isolation') && !hasIf) return false;
       }
 
       // Text search across row number, reasons, and values
@@ -270,7 +275,7 @@ export const AnomaliesPage = () => {
   const currentDataset = datasets.find((d) => d.id === selectedDatasetId);
 
   return (
-    <div className="space-y-6">
+    <div className="max-w-7xl mx-auto w-full min-w-0 space-y-6">
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
@@ -608,6 +613,21 @@ export const AnomaliesPage = () => {
       {/* Results View */}
       {results && (
         <div className="space-y-6">
+          {/* Diagnostic Warnings */}
+          {results.warnings && results.warnings.length > 0 && (
+            <div className="space-y-2">
+              {results.warnings.map((warn, wIdx) => (
+                <div
+                  key={wIdx}
+                  className="flex items-start gap-2.5 p-3 bg-amber-50 border border-amber-200 text-amber-900 rounded-xl text-xs"
+                >
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <span className="leading-relaxed">{warn}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
           {/* Executive KPI Summary Cards */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div className="bg-white border border-[#E2E8F0] rounded-2xl p-4 shadow-xs">
@@ -630,7 +650,9 @@ export const AnomaliesPage = () => {
                 {results.summary.unique_flagged_records?.toLocaleString()}
               </div>
               <span className="text-[11px] text-amber-700/80 mt-0.5 block">
-                Unique flagged observations
+                {results.iqr_results && results.isolation_forest_results
+                  ? `${results.summary.unique_flagged_records} unique (${results.summary.iqr_unique_records} IQR, ${results.summary.isolation_forest_unique_records} IF, ${results.summary.both_methods_records} overlap)`
+                  : `${results.summary.unique_flagged_records} of ${results.summary.total_records_analyzed} dataset records`}
               </span>
             </div>
 
@@ -642,7 +664,7 @@ export const AnomaliesPage = () => {
                 {results.summary.flagged_percentage?.toFixed(2)}%
               </div>
               <span className="text-[11px] text-[#94A3B8] mt-0.5 block">
-                Of total observations
+                Dataset-level ({results.summary.unique_flagged_records}/{results.summary.total_records_analyzed})
               </span>
             </div>
 
@@ -659,6 +681,139 @@ export const AnomaliesPage = () => {
             </div>
           </div>
 
+          {/* Multi-Method Overlap & Deduplication Accounting Banner */}
+          {results.iqr_results && results.isolation_forest_results && (
+            <div className="bg-gradient-to-r from-blue-50/70 via-indigo-50/50 to-amber-50/70 border border-indigo-100 rounded-2xl p-4 shadow-xs space-y-2.5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <span className="text-xs font-bold text-[#0F172A] flex items-center gap-1.5 uppercase tracking-wider">
+                  <CheckCircle2 className="w-4 h-4 text-indigo-600" />
+                  <span>Multi-Method Outlier Accounting (Set Union & Overlap)</span>
+                </span>
+                <span className="text-[11px] font-semibold text-indigo-700 bg-white px-2.5 py-0.5 rounded-full border border-indigo-200">
+                  |IQR ∪ IF| = {results.summary.iqr_unique_records} + {results.summary.isolation_forest_unique_records} − {results.summary.both_methods_records} = {results.summary.unique_flagged_records} Unique
+                </span>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
+                <div className="bg-white/90 p-2.5 rounded-xl border border-slate-200">
+                  <span className="text-[10px] font-bold text-[#64748B] uppercase block">Total Unique Outliers</span>
+                  <span className="text-lg font-black text-[#0F172A]">{results.summary.unique_flagged_records}</span>
+                  <span className="text-[10px] text-[#64748B] block">Deduplicated Union</span>
+                </div>
+                <div className="bg-white/90 p-2.5 rounded-xl border border-amber-200">
+                  <span className="text-[10px] font-bold text-amber-700 uppercase block">IQR Only</span>
+                  <span className="text-lg font-black text-amber-600">
+                    {results.summary.iqr_only_records ?? Math.max(0, (results.summary.iqr_unique_records || 0) - (results.summary.both_methods_records || 0))}
+                  </span>
+                  <span className="text-[10px] text-amber-800/80 block">Univariate bounds only</span>
+                </div>
+                <div className="bg-white/90 p-2.5 rounded-xl border border-purple-200">
+                  <span className="text-[10px] font-bold text-purple-700 uppercase block">Isolation Forest Only</span>
+                  <span className="text-lg font-black text-purple-600">
+                    {results.summary.isolation_forest_only_records ?? Math.max(0, (results.summary.isolation_forest_unique_records || 0) - (results.summary.both_methods_records || 0))}
+                  </span>
+                  <span className="text-[10px] text-purple-800/80 block">Multivariate trees only</span>
+                </div>
+                <div className="bg-white/90 p-2.5 rounded-xl border border-indigo-200">
+                  <span className="text-[10px] font-bold text-indigo-700 uppercase block">Both Methods Overlap</span>
+                  <span className="text-lg font-black text-indigo-600">{results.summary.both_methods_records || 0}</span>
+                  <span className="text-[10px] text-indigo-800/80 block">Confirmed by both</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Exact Duplicate Columns Callout Banner */}
+          {results.duplicate_columns && Object.keys(results.duplicate_columns).length > 0 && (
+            <div className="flex items-start gap-3 p-3.5 bg-blue-50/80 border border-blue-200 text-blue-900 rounded-xl text-xs">
+              <Info className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <span className="font-bold block">Exact Duplicate Numerical Features Identified</span>
+                <p className="text-[11px] text-blue-800 leading-relaxed">
+                  {Object.entries(results.duplicate_columns).map(([can, dups]) => (
+                    <span key={can} className="block">
+                      Canonical representative feature <strong>'{can}'</strong> retained. Exact duplicate column(s) <strong>{dups.map(d => `'${d}'`).join(', ')}</strong> excluded from multivariate Isolation Forest to prevent collinear model bias.
+                    </span>
+                  ))}
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Real Outlier Visualizations */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {/* 1. Feature-Wise Outlier Rate Comparison */}
+            {(() => {
+              const colResults = results.iqr_results?.column_results || {};
+              const points = Object.values(colResults).map((col) => ({
+                label: col.column,
+                value: parseFloat((col.outlier_pct ?? 0).toFixed(2)),
+                color: col.outlier_pct > 5 ? '#E97A62' : col.outlier_pct > 0 ? '#F2A18D' : '#38A995',
+              }));
+
+              if (points.length === 0) {
+                return (
+                  <div className="bg-white border border-[#E2E8F0] rounded-2xl p-6 text-center text-xs text-[#64748B]">
+                    Insufficient data to generate this chart.
+                  </div>
+                );
+              }
+
+              return (
+                <AnalyticalChart
+                  chartData={{
+                    recommended: true,
+                    chart_type: 'bar',
+                    title: 'Outlier Rate per Evaluated Feature (%)',
+                    x_axis_label: 'Feature Name',
+                    data_points: points,
+                  }}
+                  emptyMessage="Insufficient data to generate this chart."
+                />
+              );
+            })()}
+
+            {/* 2. Record Distribution: Normal vs Flagged Anomalies */}
+            {(() => {
+              const total = results.summary.total_records_analyzed || 0;
+              const outliers = results.summary.unique_flagged_records || 0;
+              const normal = Math.max(0, total - outliers);
+
+              if (total === 0) {
+                return (
+                  <div className="bg-white border border-[#E2E8F0] rounded-2xl p-6 text-center text-xs text-[#64748B]">
+                    Insufficient data to generate this chart.
+                  </div>
+                );
+              }
+
+              const points = [
+                {
+                  label: 'Normal Records',
+                  value: normal,
+                  color: '#38A995',
+                },
+                {
+                  label: 'Flagged Anomalies',
+                  value: outliers,
+                  color: '#E97A62',
+                },
+              ];
+
+              return (
+                <AnalyticalChart
+                  chartData={{
+                    recommended: true,
+                    chart_type: 'bar',
+                    title: 'Observations Integrity Breakdown (Normal vs Outliers)',
+                    x_axis_label: 'Observation Category',
+                    data_points: points,
+                  }}
+                  emptyMessage="Insufficient data to generate this chart."
+                />
+              );
+            })()}
+          </div>
+
           {/* Column-by-Column IQR Breakdown Table */}
           {results.iqr_results && Object.keys(results.iqr_results.column_results || {}).length > 0 && (
             <div className="bg-white border border-[#E2E8F0] rounded-2xl p-5 shadow-xs space-y-4">
@@ -669,11 +824,11 @@ export const AnomaliesPage = () => {
                     <span>Univariate IQR Boundaries & Outlier Counts</span>
                   </h3>
                   <p className="text-xs text-[#64748B] mt-0.5">
-                    Threshold multiplier: {results.iqr_results.multiplier}x IQR. Values outside [Lower Bound, Upper Bound] are flagged.
+                    Threshold multiplier: {results.iqr_results.multiplier}x IQR. Feature outlier rate = (outliers / valid evaluated rows) × 100. Overall dataset outlier rate = (unique flagged rows / total rows) × 100.
                   </p>
                 </div>
                 <div className="text-xs font-semibold text-[#475569]">
-                  Total Outlier Rows: {results.iqr_results.total_outlier_rows} ({(results.iqr_results.outlier_rate * 100).toFixed(2)}%)
+                  Total Outlier Rows: {results.iqr_results.total_outlier_rows} ({(results.iqr_results.outlier_rate).toFixed(2)}%)
                 </div>
               </div>
 
@@ -682,6 +837,7 @@ export const AnomaliesPage = () => {
                   <thead>
                     <tr className="border-b border-[#E2E8F0] bg-slate-50 text-[#475569] font-bold">
                       <th className="py-2.5 px-3">Column</th>
+                      <th className="py-2.5 px-3">Evaluated Rows</th>
                       <th className="py-2.5 px-3">Q1 (25%)</th>
                       <th className="py-2.5 px-3">Q3 (75%)</th>
                       <th className="py-2.5 px-3">IQR</th>
@@ -697,6 +853,23 @@ export const AnomaliesPage = () => {
                     {Object.values(results.iqr_results.column_results).map((col) => (
                       <tr key={col.column} className="hover:bg-slate-50 transition-colors">
                         <td className="py-2 px-3 font-semibold text-[#0F172A]">{col.column}</td>
+                        <td className="py-2 px-3">
+                          <div className="font-mono text-[11px] font-medium text-slate-700">
+                            {col.valid_count ?? results.summary.total_records_analyzed} / {col.total_rows || results.summary.total_records_analyzed}
+                          </div>
+                          {col.missing_count > 0 ? (
+                            <span
+                              className="inline-block mt-0.5 px-1.5 py-0.5 bg-amber-100 text-amber-800 rounded text-[10px] font-semibold"
+                              title={col.evaluation_note || `${col.missing_count} missing value(s) excluded`}
+                            >
+                              {col.missing_count} null excluded
+                            </span>
+                          ) : (
+                            <span className="inline-block mt-0.5 text-[10px] text-slate-400">
+                              100% valid
+                            </span>
+                          )}
+                        </td>
                         <td className="py-2 px-3 font-mono">{col.q1.toLocaleString()}</td>
                         <td className="py-2 px-3 font-mono">{col.q3.toLocaleString()}</td>
                         <td className="py-2 px-3 font-mono">{col.iqr.toLocaleString()}</td>
@@ -716,6 +889,9 @@ export const AnomaliesPage = () => {
                             }`}
                           >
                             {col.outlier_pct.toFixed(2)}%
+                          </span>
+                          <span className="block text-[10px] text-[#64748B] mt-0.5">
+                            {col.total_outliers} of {col.valid_count ?? results.summary.total_records_analyzed} valid
                           </span>
                         </td>
                       </tr>
@@ -818,9 +994,26 @@ export const AnomaliesPage = () => {
                   onChange={(e) => setMethodFilter(e.target.value)}
                   className="text-xs font-medium border border-slate-300 rounded-lg px-2.5 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-[#2563EB]"
                 >
-                  <option value="ALL">All Methods</option>
-                  <option value="iqr">IQR Only</option>
-                  <option value="isolation">Isolation Forest Only</option>
+                  <option value="ALL">All Unique Flagged ({results.summary.unique_flagged_records})</option>
+                  {results.iqr_results && results.isolation_forest_results && (
+                    <option value="both">Both Methods Overlap ({results.summary.both_methods_records || 0})</option>
+                  )}
+                  {results.iqr_results && (
+                    <option value="iqr_all">All IQR Outliers ({results.summary.iqr_unique_records || 0})</option>
+                  )}
+                  {results.iqr_results && results.isolation_forest_results && (
+                    <option value="iqr_only">
+                      IQR Only ({results.summary.iqr_only_records ?? Math.max(0, (results.summary.iqr_unique_records || 0) - (results.summary.both_methods_records || 0))})
+                    </option>
+                  )}
+                  {results.isolation_forest_results && (
+                    <option value="if_all">All Isolation Forest ({results.summary.isolation_forest_unique_records || 0})</option>
+                  )}
+                  {results.iqr_results && results.isolation_forest_results && (
+                    <option value="if_only">
+                      Isolation Forest Only ({results.summary.isolation_forest_only_records ?? Math.max(0, (results.summary.isolation_forest_unique_records || 0) - (results.summary.both_methods_records || 0))})
+                    </option>
+                  )}
                 </select>
               </div>
             </div>

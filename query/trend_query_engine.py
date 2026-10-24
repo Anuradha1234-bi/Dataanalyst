@@ -9,14 +9,19 @@ import pandas as pd
 import numpy as np
 
 
+from query.column_resolver import is_identifier_column
+
+
 def compute_trend_query(
     df: pd.DataFrame,
     date_col: Optional[str] = None,
     metric_col: Optional[str] = None,
     frequency: str = "monthly",
+    aggregation: Optional[str] = None,
     phase5_results: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Compute temporal trend analysis over time series data."""
+    warnings: List[str] = []
     if df is None or df.empty:
         return {
             "result_type": "empty",
@@ -46,7 +51,7 @@ def compute_trend_query(
 
     # Detect metric column if not provided
     if not metric_col:
-        num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and c != date_col]
+        num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and c != date_col and not is_identifier_column(c)]
         if num_cols:
             metric_col = num_cols[0]
         else:
@@ -58,6 +63,12 @@ def compute_trend_query(
                 "evidence": {},
                 "warnings": ["No numeric measure column found for trend analysis."],
             }
+
+    if is_identifier_column(metric_col):
+        warnings.append(
+            f"Notice: Column '{metric_col}' appears to be a sequential identifier rather than a continuous business metric. "
+            f"Trends computed over IDs do not reflect operational business performance."
+        )
 
     calc_df = df.copy()
     calc_df[date_col] = pd.to_datetime(calc_df[date_col], errors="coerce")
@@ -74,6 +85,21 @@ def compute_trend_query(
             "warnings": ["Insufficient chronological data points for trend analysis."],
         }
 
+    # Determine aggregation matching the intent/measure
+    agg_clean = (aggregation or "").lower()
+    if agg_clean in ("sum", "total") or (not agg_clean and any(t in str(metric_col).lower() for t in ["sales", "revenue", "amount", "total", "qty", "quantity"])):
+        agg_func = "sum"
+        measure_label = f"total_{metric_col}"
+    elif agg_clean in ("max", "maximum"):
+        agg_func = "max"
+        measure_label = f"max_{metric_col}"
+    elif agg_clean in ("min", "minimum"):
+        agg_func = "min"
+        measure_label = f"min_{metric_col}"
+    else:
+        agg_func = "mean"
+        measure_label = f"average_{metric_col}"
+
     # Resample or group by date
     # Determine appropriate period: if span > 90 days, monthly, else daily
     span_days = (calc_df[date_col].max() - calc_df[date_col].min()).days
@@ -84,11 +110,12 @@ def compute_trend_query(
     else:
         calc_df["Period"] = calc_df[date_col].dt.to_period("M").astype(str)
 
-    trend_series = calc_df.groupby("Period", observed=False)[metric_col].mean().reset_index()
-    trend_series.columns = ["Period", f"average_{metric_col}"]
+    # Preserve chronological order by grouping while preserving date sort
+    trend_series = calc_df.groupby("Period", observed=False, sort=False)[metric_col].agg(agg_func).reset_index()
+    trend_series.columns = ["Period", measure_label]
 
-    start_val = float(trend_series.iloc[0][f"average_{metric_col}"])
-    end_val = float(trend_series.iloc[-1][f"average_{metric_col}"])
+    start_val = float(trend_series.iloc[0][measure_label])
+    end_val = float(trend_series.iloc[-1][measure_label])
     pct_change = ((end_val - start_val) / start_val * 100.0) if start_val != 0 else 0.0
 
     if pct_change >= 2.0:
@@ -101,6 +128,7 @@ def compute_trend_query(
     evidence = {
         "date_column": date_col,
         "metric_column": metric_col,
+        "aggregation": agg_func,
         "start_period": str(trend_series.iloc[0]["Period"]),
         "start_value": round(start_val, 2),
         "end_period": str(trend_series.iloc[-1]["Period"]),
@@ -116,5 +144,5 @@ def compute_trend_query(
         "columns": list(trend_series.columns),
         "row_count": len(trend_series),
         "evidence": evidence,
-        "warnings": [],
+        "warnings": warnings,
     }

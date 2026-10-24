@@ -122,10 +122,10 @@ def extract_query_evidence(
         "raw_evidence": raw_evidence,
     }
 
-    # Pass through advanced statistical and insight containers
-    for k in ("regression_details", "test_details", "chi_details", "correlation_analysis", "automated_insights"):
-        if k in raw_evidence:
-            evidence[k] = raw_evidence[k]
+    # Pass through advanced statistical, insight, and analytical business containers
+    for k, v in raw_evidence.items():
+        if k not in evidence:
+            evidence[k] = v
 
     metadata = query_plan.get("metadata") or {}
     if metadata.get("selection_explanation"):

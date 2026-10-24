@@ -77,6 +77,37 @@ export const relationshipService = {
     });
     return response.data;
   },
+
+  /**
+   * Detect duplicate or substantially similar datasets using actual tabular content
+   * @param {number[]} datasetIds - Optional list of dataset IDs
+   */
+  async detectDuplicates(datasetIds = null) {
+    const payload = datasetIds && datasetIds.length > 0 ? { dataset_ids: datasetIds } : {};
+    const response = await api.post('/relationships/duplicates/detect', payload);
+    return response.data;
+  },
+
+  /**
+   * Fetch all detected duplicate dataset pairs for current user
+   */
+  async getDuplicates() {
+    const response = await api.get('/relationships/duplicates');
+    return response.data;
+  },
+
+  /**
+   * Ignore a duplicate pair
+   * @param {string} pairId
+   * @param {boolean} ignored
+   */
+  async ignoreDuplicate(pairId, ignored = true) {
+    const response = await api.post('/relationships/duplicates/ignore', {
+      pair_id: pairId,
+      ignored,
+    });
+    return response.data;
+  },
 };
 
 export default relationshipService;

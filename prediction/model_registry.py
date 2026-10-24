@@ -50,12 +50,19 @@ class ModelRegistry:
         },
 
         # Supervised Regression candidates
+        "baseline_mean": {
+            "name": "Mean Baseline Regressor",
+            "type": "regression_baseline",
+            "supported_problems": [ProblemType.REGRESSION],
+            "description": "Predicts the empirical target mean. Benchmark against which all models are compared.",
+            "is_baseline": True,
+        },
         "linear_regression": {
             "name": "Linear Regression",
             "type": "regression",
             "supported_problems": [ProblemType.REGRESSION],
             "description": "Parametric linear model estimating feature coefficients.",
-            "is_baseline": True,
+            "is_baseline": False,
         },
         "ridge_regression": {
             "name": "Ridge Regression (L2 Regularized)",
@@ -87,12 +94,19 @@ class ModelRegistry:
         },
 
         # Supervised Classification candidates
+        "baseline_mode": {
+            "name": "Most Frequent Baseline",
+            "type": "classification_baseline",
+            "supported_problems": [ProblemType.BINARY_CLASSIFICATION, ProblemType.MULTICLASS_CLASSIFICATION],
+            "description": "Predicts the empirical majority class label. Standard benchmark.",
+            "is_baseline": True,
+        },
         "logistic_regression": {
             "name": "Logistic Regression",
             "type": "classification",
             "supported_problems": [ProblemType.BINARY_CLASSIFICATION, ProblemType.MULTICLASS_CLASSIFICATION],
             "description": "Linear model estimating class probability log-odds.",
-            "is_baseline": True,
+            "is_baseline": False,
         },
         "decision_tree": {
             "name": "Decision Tree Classifier",

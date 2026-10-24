@@ -8,7 +8,7 @@ export const ProtectedRoute = ({ children }) => {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-[#F8FAFC]">
+      <div className="h-full w-full flex items-center justify-center bg-[var(--bg-main)]">
         <div className="flex flex-col items-center gap-3">
           <div className="w-10 h-10 border-4 border-[#2563EB] border-t-transparent rounded-full animate-spin"></div>
           <span className="text-sm font-medium text-[#64748B]">Authenticating session...</span>

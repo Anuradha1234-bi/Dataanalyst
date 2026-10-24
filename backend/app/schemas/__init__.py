@@ -13,7 +13,7 @@ from app.schemas.auth import (
     UserResponse,
     Token,
 )
-from app.schemas.dataset import DatasetResponse, DatasetUploadResponse
+from app.schemas.dataset import DatasetResponse, DatasetUploadResponse, DatasetPreviewResponse
 from app.schemas.profiling import (
     DatasetOverview,
     NumericStats,
@@ -82,7 +82,16 @@ from app.schemas.prediction import (
     PredictNewDataResponse,
 )
 
+from app.schemas.support import SupportContactRequest, SupportContactResponse
+from app.schemas.feedback import FeedbackSubmitRequest, FeedbackSubmitResponse, FeedbackTypeEnum
+
 __all__ = [
+    "SupportContactRequest",
+    "SupportContactResponse",
+    "FeedbackSubmitRequest",
+    "FeedbackSubmitResponse",
+    "FeedbackTypeEnum",
+
     "UserRegisterRequest",
     "UserLoginRequest",
     "UserSummary",
@@ -96,6 +105,7 @@ __all__ = [
     "Token",
     "DatasetResponse",
     "DatasetUploadResponse",
+    "DatasetPreviewResponse",
     "DatasetOverview",
     "NumericStats",
     "CategoricalValueCount",

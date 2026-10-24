@@ -44,6 +44,9 @@ class AnalyticsOverviewResponse(BaseModel):
     file_size_bytes: int
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    analysis_timestamp: datetime = Field(default_factory=datetime.now)
+    duplicate_row_count: int = 0
+    duplicate_column_warnings: List[str] = Field(default_factory=list)
     column_summary: List[ColumnProfileSummary]
     kpi_cards: List[KPICard]
     available_numeric_columns: List[str]
@@ -65,7 +68,7 @@ class AnalyticsChartRequest(BaseModel):
 
     dataset_id: int
     version: str = "original"
-    chart_type: str = "bar"  # 'bar', 'line', 'histogram', 'scatter', 'heatmap', 'donut', 'boxplot', 'table'
+    chart_type: str = "bar"  # 'bar', 'line', 'histogram', 'scatter', 'heatmap', 'donut', 'pie', 'boxplot', 'table'
     x_column: Optional[str] = None
     y_column: Optional[str] = None
     aggregation: Optional[str] = "sum"  # 'sum', 'mean', 'median', 'min', 'max', 'count'
@@ -94,6 +97,12 @@ class AnalyticsChartResponse(BaseModel):
     title: str
     x_axis_label: str
     y_axis_label: str
+    dataset_id: Optional[int] = None
+    dataset_name: Optional[str] = None
+    version: Optional[str] = None
+    records_used: Optional[int] = None
+    records_excluded: Optional[int] = None
+    recommendations: List[str] = Field(default_factory=list)
     data_points: List[Dict[str, Any]] = Field(default_factory=list)
     table_data: Dict[str, Any] = Field(default_factory=dict)
     matrix: Optional[List[List[float]]] = None
@@ -112,7 +121,7 @@ class AnalyticsTrendRequest(BaseModel):
     version: str = "original"
     date_column: str
     metric_column: str
-    interval: str = "daily"  # 'daily', 'weekly', 'monthly'
+    interval: str = "daily"  # 'daily', 'weekly', 'monthly', 'quarterly'
     aggregation: str = "sum"  # 'sum', 'mean', 'count'
 
 
@@ -133,6 +142,9 @@ class AnalyticsTrendResponse(BaseModel):
     date_column: str
     metric_column: str
     interval: str
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    observations_count: Optional[int] = None
     data_points: List[Dict[str, Any]]
     previous_period_comparison: Optional[PeriodComparison] = None
     trend_direction: str  # 'increasing', 'decreasing', 'relatively stable'
@@ -218,14 +230,17 @@ class AnalyticsInsightItem(BaseModel):
     """Verified, evidence-grounded analytical observation."""
 
     id: str
-    type: str  # 'concentration', 'missing_values', 'trend_change', 'correlation', 'outlier'
+    type: str  # 'missing_values', 'duplicate_columns', 'correlation', 'trend', 'outlier', 'distribution', 'concentration', 'data_quality'
     title: str
     statement: str
     metric: str
     columns_involved: List[str]
     confidence: str = "High"  # 'High', 'Moderate'
-    severity: str = "Informational"  # 'Informational', 'Warning', 'Actionable'
+    severity: str = "Informational"  # 'Informational', 'Warning', 'Critical'
+    observations_used: Optional[int] = None
+    calculation_method: Optional[str] = None
     limitations: Optional[str] = None
+    next_step: Optional[str] = None
 
 
 class AnalyticsInsightsResponse(BaseModel):
@@ -233,7 +248,11 @@ class AnalyticsInsightsResponse(BaseModel):
 
     dataset_id: int
     dataset_name: str
+    version: Optional[str] = "original"
+    total_rows: int = 0
+    total_columns: int = 0
     insights: List[AnalyticsInsightItem]
+    charts_data: Optional[Dict[str, Any]] = None
 
 
 class AnalyticsExportCSVRequest(BaseModel):

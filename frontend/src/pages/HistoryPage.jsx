@@ -153,7 +153,7 @@ export const HistoryPage = () => {
   }, [historyItems, searchQuery]);
 
   return (
-    <div className="space-y-6">
+    <div className="max-w-7xl mx-auto w-full min-w-0 space-y-6">
       {/* Top Header & Actions Bar */}
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-white border border-[#E2E8F0] rounded-2xl p-5 shadow-xs">
         <div>
