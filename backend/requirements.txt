@@ -17,3 +17,4 @@ bcrypt
 streamlit
 scipy
 plotly
+scikit-learn
