@@ -74,6 +74,7 @@ class Settings:
         "http://127.0.0.1:8000",
         "http://localhost:8002",
         "http://127.0.0.1:8002",
+        "https://taupe-bunny-372bbb.netlify.app",
     ]
 
     # Storage Paths & Upload Limits
