@@ -16,3 +16,4 @@ email-validator
 bcrypt
 streamlit
 scipy
+plotly
