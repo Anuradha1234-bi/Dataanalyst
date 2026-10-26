@@ -1,4 +1,3 @@
-
 """Email delivery service supporting Resend API and Gmail SMTP."""
 
 import html
