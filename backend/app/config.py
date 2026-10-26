@@ -1,3 +1,4 @@
+
 """Backend configuration module for AI Data Analyst Agent."""
 
 import os
@@ -27,9 +28,13 @@ class Settings:
     PROJECT_VERSION: str = "1.0.0"
     API_V1_PREFIX: str = "/api"
 
-    # Database Configuration (PostgreSQL supported, SQLite default for zero-friction setup)
+    # Database Configuration
     _env_db: str = os.getenv("DATABASE_URL", "")
-    if not _env_db or _env_db == "sqlite:///./data_analyst.db" or _env_db == f"sqlite:///{PROJECT_ROOT.as_posix()}/data_analyst.db":
+    if (
+        not _env_db
+        or _env_db == "sqlite:///./data_analyst.db"
+        or _env_db == f"sqlite:///{PROJECT_ROOT.as_posix()}/data_analyst.db"
+    ):
         DATABASE_URL: str = f"sqlite:///{BACKEND_DIR.as_posix()}/data_analyst.db"
     else:
         DATABASE_URL: str = _env_db
@@ -37,28 +42,72 @@ class Settings:
     # JWT Authentication & Security
     SECRET_KEY: str = os.getenv(
         "SECRET_KEY",
-        os.getenv("JWT_SECRET_KEY", "super-secure-dev-secret-key-change-in-production-1234567890abcdef")
+        os.getenv(
+            "JWT_SECRET_KEY",
+            "super-secure-dev-secret-key-change-in-production-1234567890abcdef",
+        ),
     )
-    JWT_SECRET_KEY: str = SECRET_KEY  # Alias for backward compatibility
+    JWT_SECRET_KEY: str = SECRET_KEY
     JWT_ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(
+        os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440")
+    )
 
-    # Password Reset & Email Configuration (Gmail SMTP)
-    PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("PASSWORD_RESET_TOKEN_EXPIRE_MINUTES", "20"))
-    FRONTEND_URL: str = os.getenv("FRONTEND_URL", "http://localhost:5174").rstrip("/")
+    # Password Reset & Email Configuration
+    PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = int(
+        os.getenv("PASSWORD_RESET_TOKEN_EXPIRE_MINUTES", "20")
+    )
+    FRONTEND_URL: str = os.getenv(
+        "FRONTEND_URL", "http://localhost:5174"
+    ).rstrip("/")
+
+    # Gmail SMTP settings (preserved as an alternative provider)
     SMTP_HOST: str = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
     SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
-    SMTP_USERNAME: str = (os.getenv("SMTP_USERNAME") or os.getenv("SMTP_USER") or "").strip()
+    SMTP_USERNAME: str = (
+        os.getenv("SMTP_USERNAME") or os.getenv("SMTP_USER") or ""
+    ).strip()
     SMTP_USER: str = SMTP_USERNAME
+
     _raw_smtp_pwd: str = os.getenv("SMTP_PASSWORD", "").strip()
-    SMTP_PASSWORD: str = _raw_smtp_pwd.replace(" ", "") if (len(_raw_smtp_pwd.replace(" ", "")) == 16 and _raw_smtp_pwd.replace(" ", "").isalnum()) else _raw_smtp_pwd
-    SMTP_FROM_EMAIL: str = (os.getenv("SMTP_FROM_EMAIL") or os.getenv("SMTP_USERNAME") or os.getenv("SMTP_USER") or "dataanalystagent@gmail.com").strip()
-    SMTP_FROM_NAME: str = os.getenv("SMTP_FROM_NAME", "AI Data Analyst Agent")
-    SMTP_TLS: bool = os.getenv("SMTP_TLS", "true").lower() in ("true", "1", "yes")
+    SMTP_PASSWORD: str = (
+        _raw_smtp_pwd.replace(" ", "")
+        if (
+            len(_raw_smtp_pwd.replace(" ", "")) == 16
+            and _raw_smtp_pwd.replace(" ", "").isalnum()
+        )
+        else _raw_smtp_pwd
+    )
+
+    SMTP_FROM_EMAIL: str = (
+        os.getenv("SMTP_FROM_EMAIL")
+        or os.getenv("SMTP_USERNAME")
+        or os.getenv("SMTP_USER")
+        or "dataanalystagent@gmail.com"
+    ).strip()
+    SMTP_FROM_NAME: str = os.getenv(
+        "SMTP_FROM_NAME", "AI Data Analyst Agent"
+    )
+    SMTP_TLS: bool = os.getenv(
+        "SMTP_TLS", "true"
+    ).lower() in ("true", "1", "yes")
+
+    # Resend API Configuration
+    EMAIL_PROVIDER: str = os.getenv(
+        "EMAIL_PROVIDER", "smtp"
+    ).strip().lower()
+    RESEND_API_KEY: str = os.getenv("RESEND_API_KEY", "").strip()
+    RESEND_FROM_EMAIL: str = os.getenv(
+        "RESEND_FROM_EMAIL", "onboarding@resend.dev"
+    ).strip()
 
     # Support Contact Information
-    SUPPORT_EMAIL: str = os.getenv("SUPPORT_EMAIL", "dataanalystagent@gmail.com").strip()
-    SUPPORT_PHONE: str = os.getenv("SUPPORT_PHONE", "9021964018").strip()
+    SUPPORT_EMAIL: str = os.getenv(
+        "SUPPORT_EMAIL", "dataanalystagent@gmail.com"
+    ).strip()
+    SUPPORT_PHONE: str = os.getenv(
+        "SUPPORT_PHONE", "9021964018"
+    ).strip()
 
     # CORS
     CORS_ORIGINS: List[str] = [
@@ -78,10 +127,18 @@ class Settings:
     ]
 
     # Storage Paths & Upload Limits
-    UPLOAD_DIR: Path = PROJECT_ROOT / os.getenv("UPLOAD_DIR", "uploads")
-    REPORTS_DIR: Path = PROJECT_ROOT / os.getenv("REPORTS_DIR", "reports")
-    MODELS_DIR: Path = PROJECT_ROOT / os.getenv("MODELS_DIR", "models_storage")
-    MAX_UPLOAD_SIZE_MB: int = int(os.getenv("MAX_UPLOAD_SIZE_MB", "50"))
+    UPLOAD_DIR: Path = PROJECT_ROOT / os.getenv(
+        "UPLOAD_DIR", "uploads"
+    )
+    REPORTS_DIR: Path = PROJECT_ROOT / os.getenv(
+        "REPORTS_DIR", "reports"
+    )
+    MODELS_DIR: Path = PROJECT_ROOT / os.getenv(
+        "MODELS_DIR", "models_storage"
+    )
+    MAX_UPLOAD_SIZE_MB: int = int(
+        os.getenv("MAX_UPLOAD_SIZE_MB", "50")
+    )
     ALLOWED_EXTENSIONS: List[str] = [".csv", ".xlsx", ".xls"]
 
     @property
